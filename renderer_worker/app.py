@@ -5,9 +5,9 @@ Endpoints:
   GET  /health   → {"ok": true, "chromium": "<version>"}
   POST /render   → JSON {"url": "..."} → PDF bytes (application/pdf)
 
-Each /render request launches its own Playwright context and browser.
-This is slower than a singleton but completely thread-safe — no greenlet
-"Cannot switch to a different thread" errors regardless of Flask threading.
+Each /render request opens a fresh browser context with full desktop-Chrome
+fingerprinting to avoid anti-bot 403 responses on PubMed / publisher pages.
+Per-request context ensures thread safety (no greenlet cross-thread errors).
 """
 
 import sys
@@ -22,6 +22,8 @@ except ImportError:
     print("Run:  pip install playwright && playwright install chromium")
     sys.exit(1)
 
+
+# ── Chromium launch args ───────────────────────────────────────────────────────
 _LAUNCH_ARGS = [
     "--no-sandbox",
     "--disable-setuid-sandbox",
@@ -39,6 +41,62 @@ _LAUNCH_ARGS = [
     "--disable-popup-blocking",
 ]
 
+# ── Realistic desktop-Chrome browser context ──────────────────────────────────
+# Matches Chrome 124 on Windows 10 (common, well-trusted UA string).
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
+_CONTEXT_OPTS = dict(
+    user_agent  = _UA,
+    viewport    = {"width": 1920, "height": 1080},
+    locale      = "en-US",
+    timezone_id = "America/New_York",
+    # Headers sent with every navigation request
+    extra_http_headers = {
+        "Accept":                    (
+            "text/html,application/xhtml+xml,application/xml;"
+            "q=0.9,image/avif,image/webp,image/apng,*/*;"
+            "q=0.8,application/signed-exchange;v=b3;q=0.7"
+        ),
+        "Accept-Language":           "en-US,en;q=0.9",
+        "Upgrade-Insecure-Requests": "1",
+        # Client-hint headers expected from Chrome 124 on Windows
+        "sec-ch-ua":                 '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "sec-ch-ua-mobile":          "?0",
+        "sec-ch-ua-platform":        '"Windows"',
+        # Sec-Fetch headers that Chrome sends on a top-level navigation
+        "sec-fetch-dest":            "document",
+        "sec-fetch-mode":            "navigate",
+        "sec-fetch-site":            "none",
+        "sec-fetch-user":            "?1",
+    },
+)
+
+# ── Init script injected into every page ──────────────────────────────────────
+# Masks automation signals that bot-detection scripts look for.
+_INIT_SCRIPT = """
+    // 1. navigator.webdriver → undefined (primary bot signal)
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+    // 2. Spoof plugins array so it looks non-empty
+    Object.defineProperty(navigator, 'plugins', {
+        get: () => Object.assign([1,2,3,4,5], { item: (i) => i }),
+    });
+
+    // 3. Realistic language list
+    Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en'],
+    });
+
+    // 4. Remove CDP / DevTools automation globals left by Chromium
+    const _cdcKeys = Object.keys(window).filter(k => k.startsWith('cdc_'));
+    _cdcKeys.forEach(k => { try { delete window[k]; } catch(_) {} });
+"""
+
+# ── PDF print options ──────────────────────────────────────────────────────────
 _PDF_OPTS = dict(
     format           = "Letter",
     print_background = True,
@@ -47,64 +105,64 @@ _PDF_OPTS = dict(
 )
 
 
+# ── Core render function ───────────────────────────────────────────────────────
+
 def _render_pdf(url: str, timeout: int = 60_000) -> bytes:
     """
-    Open url in a brand-new Playwright context, call page.pdf(), return bytes.
+    Open url in a realistic desktop-Chrome context, call page.pdf().
 
-    NO paywall detection.
-    NO publisher checks.
-    NO content filtering.
-
-    Only failure modes:
-      • Playwright throws during goto / pdf()  → exception propagates
-      • page.pdf() returns bytes that don't start with %PDF → caller checks
+    No paywall detection.  No content filtering.
+    Returns raw PDF bytes.  Raises on any Playwright error.
     """
-    print(f"  [pw] launching chromium for {url!r}", flush=True)
+    print(f"  [pw] launching chromium", flush=True)
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True, args=_LAUNCH_ARGS)
         print(f"  [pw] browser launched  version={browser.version}", flush=True)
 
-        page = browser.new_page()
-        try:
-            # ── Step 1: navigate ───────────────────────────────────────────
-            print(f"  [pw] goto url={url!r}  wait_until=networkidle  timeout={timeout}", flush=True)
-            try:
-                nav_resp = page.goto(url, wait_until="networkidle", timeout=timeout)
-                status   = nav_resp.status if nav_resp else "unknown"
-                print(f"  [pw] page loaded  http_status={status}", flush=True)
-            except Exception as nav_exc:
-                # networkidle sometimes times-out on heavy pages; fall back to
-                # domcontentloaded which is enough for a print-to-PDF.
-                print(f"  [pw] networkidle failed ({nav_exc}) — retrying with domcontentloaded", flush=True)
-                nav_resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout)
-                status   = nav_resp.status if nav_resp else "unknown"
-                print(f"  [pw] page loaded (fallback)  http_status={status}", flush=True)
+        # Fresh context with full desktop-Chrome fingerprint
+        context = browser.new_context(**_CONTEXT_OPTS)
+        context.add_init_script(_INIT_SCRIPT)
+        page = context.new_page()
 
-            # ── Step 2: settle ─────────────────────────────────────────────
-            print(f"  [pw] waiting 3 s for JS/CSS to settle …", flush=True)
-            page.wait_for_timeout(3_000)
+        try:
+            # Short human-like pause before navigation (≈ page-load intent delay)
+            page.wait_for_timeout(400)
+
+            # ── Step 1: navigate ───────────────────────────────────────────
+            print(f"  [pw] goto {url!r}  timeout={timeout}", flush=True)
+            try:
+                nav = page.goto(url, wait_until="networkidle", timeout=timeout)
+                print(f"  [pw] networkidle  http={nav.status if nav else '?'}", flush=True)
+            except Exception as e:
+                print(f"  [pw] networkidle failed ({e}) — retrying domcontentloaded", flush=True)
+                nav = page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+                print(f"  [pw] domcontentloaded  http={nav.status if nav else '?'}", flush=True)
+
+            # ── Step 2: let dynamic content settle ────────────────────────
+            page.wait_for_timeout(2_500)
 
             # ── Step 3: print to PDF ───────────────────────────────────────
             print(f"  [pw] calling page.pdf() …", flush=True)
             pdf = page.pdf(**_PDF_OPTS)
             valid = pdf[:4] == b"%PDF" if pdf else False
-            print(f"  [pw] page.pdf() returned {len(pdf):,} bytes  valid_pdf={valid}", flush=True)
+            print(f"  [pw] pdf() → {len(pdf):,} bytes  valid={valid}", flush=True)
             return pdf
 
         finally:
             page.close()
+            context.close()
             browser.close()
             print(f"  [pw] browser closed", flush=True)
 
 
-# ── Flask app ─────────────────────────────────────────────────────────────────
+# ── Flask app ──────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 
 
 @app.get("/health")
 def health():
-    """Lightweight liveness probe — just confirm Playwright can launch."""
+    """Liveness probe — confirms Playwright + Chromium are functional."""
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True, args=_LAUNCH_ARGS)
@@ -122,29 +180,24 @@ def render():
     if not url:
         return jsonify(error="url is required"), 400
 
-    print(f"\n[render] ── START ──────────────────────────────────────────", flush=True)
+    print(f"\n[render] ── START ────────────────────────────────", flush=True)
     print(f"[render] url={url!r}", flush=True)
 
-    # ── Render ────────────────────────────────────────────────────────────
     try:
         pdf_bytes = _render_pdf(url)
     except Exception as exc:
         tb = traceback.format_exc()
-        print(f"[render] EXCEPTION during _render_pdf:\n{tb}", flush=True)
+        print(f"[render] EXCEPTION:\n{tb}", flush=True)
         return jsonify(error=str(exc), traceback=tb), 500
 
-    # ── Validate ──────────────────────────────────────────────────────────
-    print(f"[render] bytes received: {len(pdf_bytes):,}", flush=True)
-    print(f"[render] first 8 bytes:  {pdf_bytes[:8]!r}", flush=True)
+    print(f"[render] bytes={len(pdf_bytes):,}  first8={pdf_bytes[:8]!r}", flush=True)
 
     if not pdf_bytes or pdf_bytes[:4] != b"%PDF":
         msg = f"page.pdf() returned {len(pdf_bytes)} bytes — not a valid PDF"
         print(f"[render] FAIL: {msg}", flush=True)
         return jsonify(error=msg), 502
 
-    print(f"[render] SUCCESS — returning {len(pdf_bytes):,} bytes", flush=True)
-    print(f"[render] ── END ────────────────────────────────────────────\n", flush=True)
-
+    print(f"[render] SUCCESS ────────────────────────────────────\n", flush=True)
     return Response(
         pdf_bytes,
         mimetype = "application/pdf",
@@ -152,11 +205,10 @@ def render():
     )
 
 
-# ── Startup ───────────────────────────────────────────────────────────────────
+# ── Startup ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = 7777
     print(f"\n  Renderer Worker — http://localhost:{port}")
-    print(f"  Set in Replit Secrets:  RENDERER_URL = http://<your-LAN-ip>:{port}\n")
-    # threaded=True is fine now: each request creates its own Playwright context
-    # so there is no shared browser state that could cause greenlet thread errors.
+    print(f"  Set in Replit Secrets:  RENDERER_URL = https://<railway-domain>\n")
+    # threaded=True is safe: each request owns its own Playwright context.
     app.run(host="0.0.0.0", port=port, threaded=True)
