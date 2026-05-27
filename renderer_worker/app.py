@@ -1,16 +1,24 @@
 """
-Renderer Worker — Playwright/Chromium PDF service.
+Renderer Worker v2.3 — Production-hardened Playwright PDF service.
 
 Endpoints:
   GET  /health         → {"ok": true, "chromium": "<version>"}
   POST /render         → JSON {"url": "..."} → PDF bytes (application/pdf)
   POST /render-batch   → JSON {"urls": [...]} → JSON {"results": [...]}
 
-Thread-safety: each request owns its own sync_playwright() + browser.
-NCBI stealth: richer navigator patches, google referer, reload-retry.
+Key design decisions (v2.3):
+  • Per-article wall-clock deadline (MAX_ARTICLE_SECONDS = 45).  Deadline is
+    checked between every major stage so a hung PMC page can't freeze the batch.
+  • networkidle REMOVED for NCBI/PubMed/PMC.  Only domcontentloaded + selector
+    wait + short stabilisation delay.  networkidle stalls on ad/tracker requests.
+  • MAX_CONCURRENT = 3 (Railway paid plan; each browser is isolated per-thread).
+  • 2 attempts max for NCBI (tight budget); 3 for generic sites.
+  • Enhanced debug artifacts: screenshot + page.html + debug_info.json on failure.
+  • No abstract/text/transcription fallback — browser-rendered PDF only.
 """
 
 import base64
+import json
 import random
 import re
 import sys
@@ -26,6 +34,12 @@ try:
 except ImportError:
     print("ERROR: playwright not installed.")
     sys.exit(1)
+
+
+# ── Tuning constants ───────────────────────────────────────────────────────────
+MAX_ARTICLE_SECONDS = 45      # hard wall-clock cap per article (all attempts)
+MAX_CONCURRENT      = 3       # concurrent browser instances (Railway paid)
+_PW_TIMEOUT_MS      = 38_000  # playwright-level timeout per attempt (ms)
 
 
 # ── Launch args ────────────────────────────────────────────────────────────────
@@ -44,7 +58,6 @@ _LAUNCH_ARGS = [
     "--hide-scrollbars",
     "--no-first-run",
     "--disable-popup-blocking",
-    # Extra flags that reduce headless fingerprinting
     "--disable-blink-features=AutomationControlled",
     "--disable-features=IsolateOrigins,site-per-process",
 ]
@@ -55,14 +68,13 @@ _UA_GENERIC = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
-# NCBI checks UA carefully — use a slightly newer version
 _UA_NCBI = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/125.0.0.0 Safari/537.36"
 )
 
-# ── Generic context options ────────────────────────────────────────────────────
+# ── Context options ────────────────────────────────────────────────────────────
 _CONTEXT_OPTS_GENERIC = dict(
     user_agent  = _UA_GENERIC,
     viewport    = {"width": 1366, "height": 768},
@@ -86,8 +98,6 @@ _CONTEXT_OPTS_GENERIC = dict(
     },
 )
 
-# ── NCBI-specific context options ──────────────────────────────────────────────
-# Adds a Google referer (simulates arriving from a search) and tighter headers.
 _CONTEXT_OPTS_NCBI = dict(
     user_agent  = _UA_NCBI,
     viewport    = {"width": 1366, "height": 768},
@@ -113,12 +123,9 @@ _CONTEXT_OPTS_NCBI = dict(
     },
 )
 
-# ── Standard stealth init script ───────────────────────────────────────────────
+# ── Stealth init scripts ────────────────────────────────────────────────────────
 _INIT_SCRIPT_BASE = """
-    // 1. Primary bot signal
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-
-    // 2. Realistic plugins array
     Object.defineProperty(navigator, 'plugins', {
         get: () => {
             const p = [
@@ -129,116 +136,82 @@ _INIT_SCRIPT_BASE = """
                 { name:'Native Client',      filename:'internal-nacl-plugin',
                   description:'' },
             ];
-            p.item       = (i) => p[i];
-            p.namedItem  = (n) => p.find(x => x.name === n) || null;
-            p.refresh    = () => {};
-            return p;
+            p.item = (i) => p[i]; p.namedItem = (n) => p.find(x=>x.name===n)||null;
+            p.refresh = ()=>{}; return p;
         }
     });
-
-    // 3. Languages
-    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-
-    // 4. Hardware signals (realistic desktop values)
+    Object.defineProperty(navigator, 'languages',           { get: () => ['en-US','en'] });
     Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
     Object.defineProperty(navigator, 'deviceMemory',        { get: () => 8 });
     Object.defineProperty(navigator, 'maxTouchPoints',      { get: () => 0 });
-
-    // 5. chrome object that real Chrome exposes
     window.chrome = {
-        app: {
-            isInstalled: false,
-            InstallState: { DISABLED:'disabled', INSTALLED:'installed',
-                            NOT_INSTALLED:'not_installed' },
-            RunningState: { CANNOT_RUN:'cannot_run', READY_TO_RUN:'ready_to_run',
-                            RUNNING:'running' }
-        },
+        app: { isInstalled: false,
+               InstallState:  { DISABLED:'disabled', INSTALLED:'installed', NOT_INSTALLED:'not_installed' },
+               RunningState:  { CANNOT_RUN:'cannot_run', READY_TO_RUN:'ready_to_run', RUNNING:'running' } },
         runtime: { id: undefined }
     };
-
-    // 6. Permissions API — prevent notifications check from leaking headless
     if (navigator.permissions && navigator.permissions.query) {
-        const _origQuery = navigator.permissions.query.bind(navigator.permissions);
+        const _oq = navigator.permissions.query.bind(navigator.permissions);
         navigator.permissions.query = (p) => {
-            if (p && p.name === 'notifications') {
+            if (p && p.name === 'notifications')
                 return Promise.resolve({ state: 'default', onchange: null });
-            }
-            return _origQuery(p);
+            return _oq(p);
         };
     }
-
-    // 7. Remove CDP / DevTools automation globals
     Object.keys(window).filter(k => k.startsWith('cdc_'))
           .forEach(k => { try { delete window[k]; } catch(_) {} });
 """
 
-# ── NCBI-specific additional patches ──────────────────────────────────────────
-_INIT_SCRIPT_NCBI_EXTRA = """
-    // NCBI checks screen colour depth and window.outerWidth/Height
-    Object.defineProperty(screen, 'colorDepth',   { get: () => 24 });
-    Object.defineProperty(screen, 'pixelDepth',   { get: () => 24 });
-    Object.defineProperty(window, 'outerWidth',   { get: () => 1366 });
-    Object.defineProperty(window, 'outerHeight',  { get: () => 768 });
-    Object.defineProperty(window, 'innerWidth',   { get: () => 1366 });
-    Object.defineProperty(window, 'innerHeight',  { get: () => 768 });
-
-    // Ensure no automation-related globals leak
-    delete window.__playwright;
-    delete window.__pw_manual;
+_INIT_SCRIPT_NCBI = _INIT_SCRIPT_BASE + """
+    Object.defineProperty(screen, 'colorDepth',  { get: () => 24 });
+    Object.defineProperty(screen, 'pixelDepth',  { get: () => 24 });
+    Object.defineProperty(window, 'outerWidth',  { get: () => 1366 });
+    Object.defineProperty(window, 'outerHeight', { get: () => 768 });
+    Object.defineProperty(window, 'innerWidth',  { get: () => 1366 });
+    Object.defineProperty(window, 'innerHeight', { get: () => 768 });
+    delete window.__playwright; delete window.__pw_manual;
 """
 
-_INIT_SCRIPT_GENERIC = _INIT_SCRIPT_BASE
-_INIT_SCRIPT_NCBI    = _INIT_SCRIPT_BASE + _INIT_SCRIPT_NCBI_EXTRA
-
-# ── PDF options ────────────────────────────────────────────────────────────────
+# ── PDF print options ──────────────────────────────────────────────────────────
 _PDF_OPTS = dict(
     format               = "Letter",
     print_background     = True,
     prefer_css_page_size = True,
-    margin               = dict(
-        top    = "0.9in",
-        left   = "0.4in",
-        right  = "0.42in",
-        bottom = "0.25in",
-    ),
+    margin               = dict(top="0.9in", left="0.4in", right="0.42in", bottom="0.25in"),
 )
 
-# ── Content detection ──────────────────────────────────────────────────────────
-_INTERSTITIAL_PHRASES = [
+# ── Selectors / content signals ────────────────────────────────────────────────
+_NCBI_SELECTORS = [
+    "#article-details", ".abstract-content", "#abstract",
+    ".full-text", ".article-details", "#full-view-heading",
+    ".pmc-article", "#mc-main-content", "#full-view",
+]
+_GENERIC_SELECTORS = [
+    "article", ".article-page", ".full-view",
+    ".article", ".content-main", "main",
+]
+_ALL_SELECTORS = _NCBI_SELECTORS + _GENERIC_SELECTORS
+
+_ACCEPT_SELECTORS    = ["#article-details", "main", "article",
+                        ".heading-title", ".abstract-content",
+                        "#abstract", "#full-view-heading"]
+_ACCEPT_TEXT         = ["abstract", "pubmed", "ncbi", "doi"]
+_BLOCK_TEXT          = ["checking your browser", "cf-browser-verification",
+                        "access denied", "403 forbidden"]
+_INTERSTITIAL_TEXT   = [
     "checking your browser", "automatically redirected",
     "verifying you are human", "just a moment", "please wait",
     "ddos protection", "ray id", "enable javascript", "browser verification",
 ]
-
-# NCBI-specific article selectors (checked first, then generic)
-_NCBI_ARTICLE_SELECTORS = [
-    "#article-details",
-    ".abstract-content",
-    "#abstract",
-    ".full-text",
-    ".article-details",
-    "#full-view-heading",
-    ".pmc-article",
-    "#mc-main-content",
-]
-_GENERIC_ARTICLE_SELECTORS = [
-    "article", ".article-page", ".full-view",
-    ".article", ".content-main", "main",
-]
-_ALL_ARTICLE_SELECTORS = _NCBI_ARTICLE_SELECTORS + _GENERIC_ARTICLE_SELECTORS
-
-_ACCEPT_SELECTORS    = ["#article-details", "main", "article",
-                        ".heading-title", ".abstract-content", "#abstract",
-                        "#full-view-heading"]
-_ACCEPT_TEXT_PHRASES = ["abstract", "pubmed", "ncbi", "doi"]
-_BLOCK_PHRASES       = ["checking your browser", "cf-browser-verification",
-                        "access denied", "403 forbidden"]
-
-_MAX_CONCURRENT = 3
+_INTERSTITIAL_CLEAR_JS = """
+(phrases) => {
+    const txt = document.body ? document.body.innerText.toLowerCase() : '';
+    return !phrases.some(p => txt.includes(p));
+}
+"""
 
 
-# ── URL classifiers ────────────────────────────────────────────────────────────
-
+# ── Classifiers ────────────────────────────────────────────────────────────────
 def _is_ncbi(url: str) -> bool:
     return any(h in url for h in (
         "pubmed.ncbi.nlm.nih.gov",
@@ -250,15 +223,25 @@ def _is_pmc(url: str) -> bool:
     return "pmc.ncbi.nlm.nih.gov" in url or "/pmc/articles/" in url
 
 
-# ── Page helpers ───────────────────────────────────────────────────────────────
+# ── Deadline helper ────────────────────────────────────────────────────────────
+class _DeadlineExceeded(RuntimeError):
+    pass
 
+def _check(deadline: float, stage: str) -> None:
+    remaining = deadline - time.time()
+    if remaining <= 0:
+        raise _DeadlineExceeded(f"wall-clock deadline exceeded at {stage!r}")
+    return remaining
+
+
+# ── Page helpers ───────────────────────────────────────────────────────────────
 def _validate_page(page, body_lower: str = "") -> tuple[bool, str]:
     if not body_lower:
         try:
             body_lower = page.inner_text("body", timeout=5_000).lower()
         except Exception:
             body_lower = ""
-    for phrase in _BLOCK_PHRASES:
+    for phrase in _BLOCK_TEXT:
         if phrase in body_lower:
             return False, f"hard block: {phrase!r}"
     for sel in _ACCEPT_SELECTORS:
@@ -267,23 +250,15 @@ def _validate_page(page, body_lower: str = "") -> tuple[bool, str]:
                 return True, f"selector: {sel!r}"
         except Exception:
             continue
-    for phrase in _ACCEPT_TEXT_PHRASES:
+    for phrase in _ACCEPT_TEXT:
         if phrase in body_lower:
             return True, f"text: {phrase!r}"
     return False, "no accept-selector and no key text"
 
 
-_INTERSTITIAL_CLEAR_JS = """
-(phrases) => {
-    const txt = document.body ? document.body.innerText.toLowerCase() : '';
-    return !phrases.some(p => txt.includes(p));
-}
-"""
-
-
 def _wait_for_article(page, prefix: str, selectors: list,
-                       timeout_ms: int = 12_000) -> bool:
-    per_ms = max(1_200, timeout_ms // len(selectors))
+                       timeout_ms: int = 10_000) -> bool:
+    per_ms = max(1_000, timeout_ms // max(len(selectors), 1))
     for sel in selectors:
         try:
             page.wait_for_selector(sel, state="visible", timeout=per_ms)
@@ -295,18 +270,24 @@ def _wait_for_article(page, prefix: str, selectors: list,
     return False
 
 
-def _wait_past_interstitial(page, prefix: str, timeout_ms: int = 35_000) -> None:
+def _wait_past_interstitial(page, prefix: str,
+                             timeout_ms: int = 25_000,
+                             skip_networkidle: bool = False) -> None:
+    """
+    Wait for Cloudflare / bot-check interstitials to clear.
+    skip_networkidle=True for NCBI — networkidle stalls on tracker requests.
+    """
     try:
-        body = page.inner_text("body", timeout=5_000).lower()
+        body = page.inner_text("body", timeout=4_000).lower()
     except Exception:
         return
-    found = [p for p in _INTERSTITIAL_PHRASES if p in body]
+    found = [p for p in _INTERSTITIAL_TEXT if p in body]
     if not found:
         return
     print(f"{prefix} [interstitial] detected: {found}", flush=True)
     try:
         page.wait_for_function(
-            _INTERSTITIAL_CLEAR_JS, arg=_INTERSTITIAL_PHRASES,
+            _INTERSTITIAL_CLEAR_JS, arg=_INTERSTITIAL_TEXT,
             timeout=timeout_ms, polling=500,
         )
         print(f"{prefix} [interstitial] cleared", flush=True)
@@ -317,124 +298,161 @@ def _wait_past_interstitial(page, prefix: str, timeout_ms: int = 35_000) -> None
             print(f"{prefix} [interstitial] redirect fired", flush=True)
         else:
             print(f"{prefix} [interstitial] timeout — proceeding", flush=True)
-    try:
-        page.wait_for_load_state("networkidle", timeout=20_000)
-    except Exception:
-        pass
+
+    # networkidle deliberately skipped for NCBI — tracker/ad requests never settle
+    if not skip_networkidle:
+        try:
+            page.wait_for_load_state("networkidle", timeout=15_000)
+        except Exception:
+            pass
 
 
-def _save_debug_screenshot(page, url: str, label: str) -> None:
-    """Save a screenshot + HTML to debug/ for post-mortem inspection."""
+def _save_debug_artifacts(page, url: str, label: str,
+                           elapsed_s: float | None = None,
+                           http_status: int | str | None = None,
+                           error: str | None = None) -> None:
+    """Save screenshot + page.html + debug_info.json for post-mortem inspection."""
     try:
-        m    = re.search(r"/(\d+)/?$", url)
+        m    = re.search(r"/(\d+)/?(?:\?.*)?$", url)
         slug = m.group(1) if m else re.sub(r"[^a-z0-9]", "_", url.lower())[:40]
         dbg  = Path(f"debug/{slug}/{label}")
         dbg.mkdir(parents=True, exist_ok=True)
+
         page.screenshot(path=str(dbg / "screenshot.png"), full_page=True)
         (dbg / "page.html").write_text(page.content(), encoding="utf-8")
+
+        info = {
+            "url":         url,
+            "label":       label,
+            "timestamp":   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "elapsed_s":   round(elapsed_s, 2) if elapsed_s is not None else None,
+            "http_status": http_status,
+            "final_url":   page.url,
+            "error":       error,
+        }
+        (dbg / "debug_info.json").write_text(
+            json.dumps(info, indent=2), encoding="utf-8"
+        )
         print(f"  [debug] artifacts → {dbg}/", flush=True)
     except Exception as e:
-        print(f"  [debug] screenshot failed: {e}", flush=True)
+        print(f"  [debug] artifact save failed: {e}", flush=True)
 
 
-# ── Single-attempt render ──────────────────────────────────────────────────────
-
-def _one_attempt(url: str, attempt: int, timeout: int) -> bytes:
+# ── Single attempt ─────────────────────────────────────────────────────────────
+def _one_attempt(url: str, attempt: int, deadline: float) -> bytes:
     """
     Full render attempt in an isolated playwright/browser/context/page.
-    NCBI URLs get stronger stealth context and a reload-retry pass.
+    All major stages check the wall-clock deadline; stalls raise _DeadlineExceeded.
+    networkidle is skipped for NCBI — use selector + short settle instead.
     """
-    ncbi   = _is_ncbi(url)
-    pmc    = _is_pmc(url)
-    prefix = f"  [pw a{attempt}{'N' if ncbi else ''}]"
+    t0   = time.time()
+    ncbi = _is_ncbi(url)
+    pmc  = _is_pmc(url)
+    pfx  = f"  [pw a{attempt}{'N' if ncbi else ''}]"
 
     ctx_opts    = _CONTEXT_OPTS_NCBI    if ncbi else _CONTEXT_OPTS_GENERIC
-    init_script = _INIT_SCRIPT_NCBI     if ncbi else _INIT_SCRIPT_GENERIC
-    selectors   = (_NCBI_ARTICLE_SELECTORS if ncbi
-                   else _ALL_ARTICLE_SELECTORS)
+    init_script = _INIT_SCRIPT_NCBI     if ncbi else _INIT_SCRIPT_BASE
+    selectors   = _NCBI_SELECTORS       if ncbi else _ALL_SELECTORS
 
-    print(f"{prefix} START  ncbi={ncbi} pmc={pmc}  url={url!r}", flush=True)
+    remaining_s = _check(deadline, "start")
+    # Nav timeout = min(20s, 55% of remaining wall-clock) in ms
+    nav_ms = min(20_000, int(remaining_s * 0.55 * 1_000))
+
+    print(f"{pfx} START  ncbi={ncbi} pmc={pmc}  remaining={remaining_s:.1f}s  "
+          f"nav_ms={nav_ms}  url={url!r}", flush=True)
 
     with sync_playwright() as pw:
-        print(f"{prefix} playwright started", flush=True)
-
+        print(f"{pfx} playwright started", flush=True)
         browser = pw.chromium.launch(headless=True, args=_LAUNCH_ARGS)
-        print(f"{prefix} browser launched  ver={browser.version}", flush=True)
+        print(f"{pfx} browser launched  ver={browser.version}", flush=True)
 
         context = browser.new_context(**ctx_opts)
         context.add_init_script(init_script)
-        print(f"{prefix} context created (ncbi={ncbi})", flush=True)
-
-        page = context.new_page()
+        page    = context.new_page()
         page.set_viewport_size({"width": 1366, "height": 768})
-        print(f"{prefix} page created", flush=True)
+
+        http_status: int | str = "?"
 
         try:
-            # ── Pre-nav pacing ────────────────────────────────────
-            if ncbi:
-                # Brief realistic pause before hitting NCBI
-                pre_ms = random.randint(800, 1_500)
-            else:
-                pre_ms = random.randint(200, 600)
+            # ── Pre-nav pacing ─────────────────────────────────────
+            _check(deadline, "pre-nav")
+            pre_ms = random.randint(500, 900) if ncbi else random.randint(100, 300)
             page.wait_for_timeout(pre_ms)
 
-            # ── Navigate ──────────────────────────────────────────
-            nav_timeout = int(timeout * 0.55)
-            print(f"{prefix} goto {url!r}", flush=True)
+            # ── Navigate ───────────────────────────────────────────
+            _check(deadline, "navigate")
+            print(f"{pfx} goto {url!r}  nav_ms={nav_ms}", flush=True)
             try:
                 nav = page.goto(url, wait_until="domcontentloaded",
-                                timeout=nav_timeout)
-                status = nav.status if nav else "?"
-                print(f"{prefix} goto complete  http={status}  "
-                      f"url={page.url!r}", flush=True)
-            except Exception as e:
-                print(f"{prefix} goto FAILED: {e.__class__.__name__}: {e}",
+                                timeout=nav_ms)
+                http_status = nav.status if nav else "?"
+                print(f"{pfx} goto ok  http={http_status}  url={page.url!r}",
                       flush=True)
+            except Exception as e:
+                print(f"{pfx} goto FAILED: {e.__class__.__name__}: {e}", flush=True)
                 raise
 
-            # ── Wait for content ──────────────────────────────────
+            # ── Wait for content ───────────────────────────────────
+            _check(deadline, "wait-content")
+
             if ncbi:
-                # Wait for interstitial to clear, then article selectors
-                _wait_past_interstitial(page, prefix, timeout_ms=30_000)
-                found = _wait_for_article(page, prefix, selectors,
-                                          timeout_ms=15_000)
-                print(f"{prefix} article selector found={found}", flush=True)
+                # Interstitial wait — no networkidle for NCBI
+                _wait_past_interstitial(page, pfx, timeout_ms=20_000,
+                                        skip_networkidle=True)
+                _check(deadline, "post-interstitial")
 
-                # ── NCBI reload-retry if first content check failed ──
-                if not found:
-                    print(f"{prefix} [ncbi-reload] no selector — "
-                          f"saving screenshot and reloading", flush=True)
-                    _save_debug_screenshot(page, url, f"a{attempt}_before_reload")
+                # Article selector wait
+                art_budget_ms = max(4_000, int((_check(deadline, "article-wait") - 2) * 1_000))
+                found = _wait_for_article(page, pfx, selectors,
+                                          timeout_ms=min(art_budget_ms, 12_000))
+                print(f"{pfx} article selector found={found}", flush=True)
+
+                # Reload-retry only if time allows (need ≥ 12s)
+                if not found and _check(deadline, "reload-check") >= 12:
+                    print(f"{pfx} [ncbi-reload] no selector — reloading", flush=True)
+                    _save_debug_artifacts(
+                        page, url, f"a{attempt}_before_reload",
+                        elapsed_s=time.time() - t0,
+                        http_status=http_status,
+                        error="no article selector before reload",
+                    )
                     try:
-                        page.reload(wait_until="domcontentloaded",
-                                    timeout=nav_timeout)
-                        print(f"{prefix} [ncbi-reload] reloaded  "
-                              f"url={page.url!r}", flush=True)
-                        _wait_for_article(page, prefix, selectors,
-                                          timeout_ms=15_000)
-                    except Exception as re_exc:
-                        print(f"{prefix} [ncbi-reload] reload failed: {re_exc}",
+                        page.reload(wait_until="domcontentloaded", timeout=nav_ms)
+                        print(f"{pfx} [ncbi-reload] reloaded  url={page.url!r}",
                               flush=True)
+                        _check(deadline, "post-reload")
+                        _wait_for_article(page, pfx, selectors, timeout_ms=8_000)
+                    except _DeadlineExceeded:
+                        raise
+                    except Exception as re_exc:
+                        print(f"{pfx} [ncbi-reload] failed: {re_exc}", flush=True)
             else:
-                # Generic: handle interstitial then wait for article
-                _wait_past_interstitial(page, prefix)
-                _wait_for_article(page, prefix, selectors, timeout_ms=10_000)
+                _wait_past_interstitial(page, pfx, timeout_ms=25_000,
+                                        skip_networkidle=False)
+                _check(deadline, "post-interstitial-generic")
+                _wait_for_article(page, pfx, selectors, timeout_ms=8_000)
 
-            # ── Validate ──────────────────────────────────────────
-            print(f"{prefix} validating page  url={page.url!r}", flush=True)
+            # ── Validate ───────────────────────────────────────────
+            _check(deadline, "validate")
+            print(f"{pfx} validating page  url={page.url!r}", flush=True)
             try:
-                body_lower = page.inner_text("body", timeout=5_000).lower()
+                body_lower = page.inner_text("body", timeout=4_000).lower()
             except Exception:
                 body_lower = ""
 
             ok, reason = _validate_page(page, body_lower)
-            print(f"{prefix} validation  ok={ok}  reason={reason!r}", flush=True)
+            print(f"{pfx} validation  ok={ok}  reason={reason!r}", flush=True)
 
             if not ok:
-                _save_debug_screenshot(page, url, f"a{attempt}_rejected")
+                _save_debug_artifacts(
+                    page, url, f"a{attempt}_rejected",
+                    elapsed_s=time.time() - t0,
+                    http_status=http_status,
+                    error=f"validation failed: {reason}",
+                )
                 raise ValueError(f"page rejected — {reason}  url={page.url!r}")
 
-            # ── Print CSS ─────────────────────────────────────────
+            # ── Print CSS ──────────────────────────────────────────
             page.add_style_tag(content="""
 html, body { width:100% !important; margin:0 !important;
              padding:0 !important; overflow-x:hidden !important; }
@@ -442,55 +460,77 @@ main, article, .article-page, #article-details,
 .abstract-content { max-width:100% !important; }
 """)
 
-            # ── Pre-PDF settle ────────────────────────────────────
-            settle_ms = random.randint(1_000, 1_800) if ncbi else random.randint(800, 1_300)
-            print(f"{prefix} pre-pdf settle {settle_ms} ms", flush=True)
+            # ── Pre-PDF settle — selector wait already cleared content ─
+            _check(deadline, "pre-pdf-settle")
+            settle_ms = random.randint(1_200, 1_800) if ncbi else random.randint(500, 900)
+            print(f"{pfx} pre-pdf settle {settle_ms} ms", flush=True)
             page.wait_for_timeout(settle_ms)
 
-            # ── Print to PDF ──────────────────────────────────────
-            print(f"{prefix} calling page.pdf()", flush=True)
+            # ── Print to PDF ───────────────────────────────────────
+            _check(deadline, "print-pdf")
+            print(f"{pfx} calling page.pdf()", flush=True)
             pdf = page.pdf(**_PDF_OPTS)
             valid = bool(pdf and pdf[:4] == b"%PDF")
-            print(f"{prefix} pdf() → {len(pdf):,} bytes  valid={valid}",
-                  flush=True)
+            elapsed = time.time() - t0
+            print(f"{pfx} pdf() → {len(pdf):,} bytes  valid={valid}  "
+                  f"elapsed={elapsed:.1f}s", flush=True)
 
             if not valid:
                 raise ValueError(
                     f"page.pdf() returned {len(pdf)} bytes — not a valid PDF")
 
-            print(f"{prefix} SUCCESS", flush=True)
+            print(f"{pfx} SUCCESS  elapsed={elapsed:.1f}s", flush=True)
             return pdf
 
         except Exception:
-            print(f"{prefix} EXCEPTION:", flush=True)
+            print(f"{pfx} EXCEPTION (elapsed={time.time()-t0:.1f}s):", flush=True)
             traceback.print_exc()
             raise
 
         finally:
-            for obj, name in ((page, "page"), (context, "context"),
-                               (browser, "browser")):
+            for obj in (page, context, browser):
                 try:
                     obj.close()
                 except Exception:
                     pass
-            print(f"{prefix} closed all", flush=True)
+            print(f"{pfx} closed all  elapsed={time.time()-t0:.1f}s", flush=True)
 
 
-# ── Core render — up to 3 attempts ────────────────────────────────────────────
-
-def _render_pdf(url: str, timeout: int = 50_000) -> bytes:
+# ── Core render — retries with deadline ───────────────────────────────────────
+def _render_pdf(url: str) -> bytes:
+    """
+    Render URL to PDF.  Honours a per-article wall-clock deadline
+    (MAX_ARTICLE_SECONDS).  NCBI gets 2 attempts; generic sites get 3.
+    """
+    deadline   = time.time() + MAX_ARTICLE_SECONDS
+    max_tries  = 2 if _is_ncbi(url) else 3
     last_exc: Exception = RuntimeError("no attempts made")
-    for attempt in range(1, 4):
+
+    for attempt in range(1, max_tries + 1):
+        remaining = deadline - time.time()
+        if remaining <= 3:
+            print(f"  [pw] skipping attempt {attempt} — only {remaining:.1f}s left",
+                  flush=True)
+            break
         try:
-            return _one_attempt(url, attempt, timeout)
+            return _one_attempt(url, attempt, deadline)
+        except _DeadlineExceeded as exc:
+            last_exc = exc
+            print(f"  [pw] attempt {attempt} deadline exceeded — stopping", flush=True)
+            break
         except Exception as exc:
             last_exc = exc
             print(f"  [pw] attempt {attempt} FAILED: {exc}", flush=True)
-            if attempt < 3:
-                backoff = random.uniform(2.5, 5.0)
+            if attempt < max_tries:
+                remaining = deadline - time.time()
+                backoff   = min(random.uniform(2.0, 4.0), remaining - 3)
+                if backoff < 1:
+                    print(f"  [pw] no time for backoff — aborting", flush=True)
+                    break
                 print(f"  [pw] backoff {backoff:.1f}s before attempt {attempt+1}",
                       flush=True)
                 time.sleep(backoff)
+
     raise last_exc
 
 
@@ -507,7 +547,10 @@ def health():
             browser.close()
     except Exception as exc:
         return jsonify(ok=False, error=str(exc)), 503
-    return jsonify(ok=True, service="renderer-worker", version="2.2", chromium=ver)
+    return jsonify(ok=True, service="renderer-worker", version="2.3",
+                   chromium=ver,
+                   max_concurrent=MAX_CONCURRENT,
+                   max_article_seconds=MAX_ARTICLE_SECONDS)
 
 
 @app.post("/render")
@@ -518,21 +561,23 @@ def render():
         return jsonify(error="url is required"), 400
 
     print(f"\n[render] START  url={url!r}", flush=True)
+    t0 = time.time()
     try:
         pdf_bytes = _render_pdf(url)
     except Exception as exc:
         tb = traceback.format_exc()
-        print(f"[render] FAILED  url={url!r}\n{tb}", flush=True)
+        print(f"[render] FAILED  elapsed={time.time()-t0:.1f}s  url={url!r}\n{tb}",
+              flush=True)
         return jsonify(error=str(exc), traceback=tb), 500
 
     if not pdf_bytes or pdf_bytes[:4] != b"%PDF":
-        msg = f"page.pdf() returned {len(pdf_bytes)} bytes — not a valid PDF"
-        print(f"[render] INVALID PDF  url={url!r}", flush=True)
-        return jsonify(error=msg), 502
+        return jsonify(error=f"pdf() returned {len(pdf_bytes)} bytes — not valid"), 502
 
-    print(f"[render] SUCCESS  {len(pdf_bytes):,} bytes  url={url!r}", flush=True)
+    print(f"[render] SUCCESS  {len(pdf_bytes):,} bytes  "
+          f"elapsed={time.time()-t0:.1f}s  url={url!r}", flush=True)
     return Response(pdf_bytes, mimetype="application/pdf",
-                    headers={"X-PDF-Size": str(len(pdf_bytes))})
+                    headers={"X-PDF-Size": str(len(pdf_bytes)),
+                             "X-Elapsed-S":  f"{time.time()-t0:.1f}"})
 
 
 @app.post("/render-batch")
@@ -542,25 +587,32 @@ def render_batch():
     if not urls:
         return jsonify(error="urls list required"), 400
 
-    print(f"\n[batch] START  {len(urls)} URL(s)  max_concurrent={_MAX_CONCURRENT}",
+    print(f"\n[batch] START  {len(urls)} URL(s)  "
+          f"max_concurrent={MAX_CONCURRENT}  deadline_per={MAX_ARTICLE_SECONDS}s",
           flush=True)
 
     results: list[dict | None] = [None] * len(urls)
 
     def _render_one(idx: int, url: str) -> tuple[int, dict]:
+        t0 = time.time()
         print(f"  [batch] [{idx+1}/{len(urls)}] START  {url!r}", flush=True)
         try:
             pdf = _render_pdf(url)
+            elapsed = time.time() - t0
             print(f"  [batch] [{idx+1}/{len(urls)}] SUCCESS  "
-                  f"{len(pdf):,} bytes  {url!r}", flush=True)
+                  f"{len(pdf):,} bytes  {elapsed:.1f}s  {url!r}", flush=True)
             return idx, {"url": url, "ok": True,
+                         "elapsed_s": round(elapsed, 1),
                          "pdf_b64": base64.b64encode(pdf).decode()}
         except Exception as exc:
+            elapsed = time.time() - t0
             print(f"  [batch] [{idx+1}/{len(urls)}] FAILED  "
-                  f"{exc!r}  {url!r}", flush=True)
-            return idx, {"url": url, "ok": False, "error": str(exc)}
+                  f"{elapsed:.1f}s  {exc!r}  {url!r}", flush=True)
+            return idx, {"url": url, "ok": False,
+                         "elapsed_s": round(elapsed, 1),
+                         "error": str(exc)}
 
-    with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT) as pool:
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as pool:
         futures = [pool.submit(_render_one, i, u) for i, u in enumerate(urls)]
         for f in as_completed(futures):
             idx, res = f.result()
@@ -568,12 +620,14 @@ def render_batch():
 
     ok   = sum(1 for r in results if r and r.get("ok"))
     fail = len(results) - ok
-    print(f"[batch] DONE  {ok} ok, {fail} failed", flush=True)
+    print(f"[batch] DONE  {ok} ok  {fail} failed", flush=True)
     return jsonify(results=results)
 
 
 if __name__ == "__main__":
     port = 7777
-    print(f"\n  Renderer Worker v2.2 — http://localhost:{port}")
-    print(f"  NCBI stealth: enhanced  Thread model: per-request\n")
+    print(f"\n  Renderer Worker v2.3 — http://localhost:{port}")
+    print(f"  max_concurrent={MAX_CONCURRENT}  "
+          f"deadline_per_article={MAX_ARTICLE_SECONDS}s  "
+          f"networkidle_for_ncbi=NO\n")
     app.run(host="0.0.0.0", port=port, threaded=True)
