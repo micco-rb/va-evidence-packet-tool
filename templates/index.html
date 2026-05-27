@@ -1,0 +1,915 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VA Evidence Packet Automation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { font-family: 'Inter', system-ui, sans-serif; }
+    body { background: #0a0f1e; color: #e2e8f0; }
+
+    .glass {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      backdrop-filter: blur(12px);
+    }
+
+    .drop-zone {
+      border: 2px dashed rgba(99,102,241,0.35);
+      border-radius: 14px; transition: all 0.2s; cursor: pointer;
+    }
+    .drop-zone:hover, .drop-zone.dragover {
+      border-color: #6366f1; background: rgba(99,102,241,0.06);
+    }
+    .drop-zone.has-file {
+      border-color: rgba(34,197,94,0.5); background: rgba(34,197,94,0.03);
+    }
+
+    .log-box {
+      background: #050810; border: 1px solid rgba(255,255,255,0.06);
+      font-family: 'Courier New', monospace; font-size: 12px; line-height: 1.6;
+      max-height: 260px; overflow-y: auto;
+      scrollbar-width: thin; scrollbar-color: #374151 transparent;
+    }
+    .debug-box {
+      background: #050810; border: 1px solid rgba(255,255,255,0.06);
+      font-family: 'Courier New', monospace; font-size: 11px; line-height: 1.7;
+      max-height: 180px; overflow-y: auto;
+      scrollbar-width: thin; scrollbar-color: #374151 transparent;
+    }
+
+    .pill { display:inline-flex; align-items:center; gap:5px; padding:3px 11px; border-radius:9999px; font-size:12px; font-weight:500; }
+    .pill-blue  { background:rgba(99,102,241,.15);  border:1px solid rgba(99,102,241,.3);  color:#a5b4fc; }
+    .pill-green { background:rgba(34,197,94,.12);   border:1px solid rgba(34,197,94,.3);   color:#86efac; }
+    .pill-gray  { background:rgba(107,114,128,.15); border:1px solid rgba(107,114,128,.3); color:#9ca3af; }
+    .pill-amber { background:rgba(245,158,11,.12);  border:1px solid rgba(245,158,11,.3);  color:#fcd34d; }
+
+    .spinner {
+      width:18px; height:18px;
+      border:2px solid rgba(99,102,241,.3); border-top-color:#6366f1;
+      border-radius:50%; animation:spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform:rotate(360deg); } }
+
+    .progress-track { background:rgba(255,255,255,.06); border-radius:9999px; height:4px; overflow:hidden; }
+    .progress-fill  { background:linear-gradient(90deg,#6366f1,#818cf8); height:100%; border-radius:9999px; transition:width .5s ease; }
+
+    .section { display:none; }
+    .section.visible { display:block; }
+
+    .article-row {
+      display:flex; align-items:center; justify-content:space-between;
+      padding:10px 16px; border-radius:8px;
+      background:rgba(255,255,255,.03); border:1px solid rgba(255,255,255,.06);
+      margin-bottom:8px;
+    }
+
+    /* Per-condition packet card */
+    .packet-card {
+      background: rgba(16,185,129,.05);
+      border: 1px solid rgba(16,185,129,.2);
+      border-radius: 14px; padding: 20px;
+      display: flex; flex-direction: column; gap: 12px;
+    }
+    .packet-card .pdf-count {
+      background: rgba(16,185,129,.12);
+      border: 1px solid rgba(16,185,129,.25);
+      border-radius: 6px; padding: 2px 10px;
+      font-size: 12px; color: #6ee7b7;
+    }
+
+    .condition-card {
+      display:flex; align-items:center;
+      background:rgba(255,255,255,.03); border:1px solid rgba(255,255,255,.08);
+      border-radius:10px; padding:12px 16px;
+      cursor:pointer; transition:all .15s; user-select:none;
+    }
+    .condition-card:hover  { background:rgba(99,102,241,.08); border-color:rgba(99,102,241,.3); }
+    .condition-card.selected  { background:rgba(99,102,241,.12); border-color:rgba(99,102,241,.45); }
+    .condition-card.deselected { opacity:.4; }
+    .condition-card input[type=checkbox] { accent-color:#6366f1; width:16px; height:16px; cursor:pointer; flex-shrink:0; }
+
+    .btn-primary {
+      background:linear-gradient(135deg,#6366f1,#8b5cf6); color:white;
+      border:none; border-radius:10px; padding:12px 28px;
+      font-weight:600; font-size:15px; cursor:pointer; transition:all .2s;
+    }
+    .btn-primary:hover   { opacity:.9; transform:translateY(-1px); }
+    .btn-primary:disabled { opacity:.35; cursor:not-allowed; transform:none; }
+
+    .btn-dl {
+      background:linear-gradient(135deg,#059669,#10b981); color:white;
+      border:none; border-radius:9px; padding:10px 20px;
+      font-weight:600; font-size:14px; cursor:pointer; transition:all .2s;
+      display:inline-flex; align-items:center; gap:8px; width:100%;
+      justify-content:center;
+    }
+    .btn-dl:hover { opacity:.92; transform:translateY(-1px); box-shadow:0 6px 20px rgba(16,185,129,.3); }
+
+    .btn-secondary {
+      background:rgba(255,255,255,.06); color:#94a3b8;
+      border:1px solid rgba(255,255,255,.1); border-radius:8px;
+      padding:9px 20px; font-weight:500; font-size:13px;
+      cursor:pointer; transition:all .15s; display:inline-flex; align-items:center; gap:6px;
+    }
+    .btn-secondary:hover { background:rgba(255,255,255,.1); color:#e2e8f0; }
+
+    .stat-card { background:rgba(255,255,255,.03); border:1px solid rgba(255,255,255,.07); border-radius:12px; padding:20px; text-align:center; }
+
+    .stage-dot {
+      width:8px; height:8px; border-radius:50%;
+      background:rgba(255,255,255,.15); flex-shrink:0; transition:all .3s;
+    }
+    .stage-dot.active { background:#6366f1; box-shadow:0 0 8px rgba(99,102,241,.6); }
+    .stage-dot.done   { background:#22c55e; }
+
+    details > summary { list-style:none; cursor:pointer; }
+    details > summary::-webkit-details-marker { display:none; }
+    details[open] .chev { transform:rotate(180deg); }
+    .chev { transition:transform .2s; display:inline-block; }
+  </style>
+</head>
+<body class="min-h-screen">
+
+  <header class="border-b border-white/5 px-6 py-4">
+    <div class="max-w-4xl mx-auto flex items-center gap-3">
+      <div class="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center text-white font-bold text-sm">VA</div>
+      <div class="flex-1">
+        <h1 class="text-white font-semibold text-base leading-none">Evidence Packet Automation</h1>
+        <p class="text-slate-500 text-xs mt-0.5">Per-Condition Packet Builder</p>
+      </div>
+      <button onclick="showSettings()" title="Signature Settings"
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/8 transition-colors text-xs font-medium border border-white/8">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"
+            d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+        </svg>
+        Settings
+        <span id="sig-dot" class="hidden w-2 h-2 rounded-full bg-amber-400 flex-shrink-0"></span>
+      </button>
+    </div>
+  </header>
+
+  <main class="max-w-4xl mx-auto px-6 py-10">
+
+    <!-- ══════════════════════════════════════════════════════
+         UPLOAD
+    ══════════════════════════════════════════════════════ -->
+    <section id="section-upload" class="section visible">
+      <div class="text-center mb-10">
+        <h2 class="text-3xl font-bold text-white mb-3">Build Evidence Packets</h2>
+        <p class="text-slate-400 text-base max-w-2xl mx-auto">Upload the veteran memorandum and the ESF. One separate evidence packet is generated per claimed condition.</p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-5 mb-8">
+        <!-- Memorandum -->
+        <div>
+          <p class="text-slate-300 text-sm font-semibold mb-2 flex items-center gap-2">
+            <span class="w-5 h-5 rounded-full bg-indigo-600 text-white text-xs flex items-center justify-center font-bold">1</span>
+            Veteran Memorandum
+          </p>
+          <div id="dz-memo" class="drop-zone p-7 text-center" onclick="document.getElementById('inp-memo').click()">
+            <div class="w-12 h-12 mx-auto mb-3 rounded-xl bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center">
+              <svg class="w-6 h-6 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+            </div>
+            <p class="text-white font-medium text-sm mb-0.5" id="memo-label">Drop .docx or .pdf</p>
+            <p class="text-slate-500 text-xs" id="memo-sub">Conditions extracted from this file only</p>
+            <input type="file" id="inp-memo" accept=".docx,.pdf" style="display:none" />
+          </div>
+        </div>
+        <!-- ESF -->
+        <div>
+          <p class="text-slate-300 text-sm font-semibold mb-2 flex items-center gap-2">
+            <span class="w-5 h-5 rounded-full bg-indigo-600 text-white text-xs flex items-center justify-center font-bold">2</span>
+            Evidence Summary Form (ESF)
+          </p>
+          <div id="dz-esf" class="drop-zone p-7 text-center" onclick="document.getElementById('inp-esf').click()">
+            <div class="w-12 h-12 mx-auto mb-3 rounded-xl bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center">
+              <svg class="w-6 h-6 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+            </div>
+            <p class="text-white font-medium text-sm mb-0.5" id="esf-label">Drop .pdf ESF here</p>
+            <p class="text-slate-500 text-xs" id="esf-sub">One filled copy created per condition</p>
+            <input type="file" id="inp-esf" accept=".pdf" style="display:none" />
+          </div>
+        </div>
+      </div>
+
+      <!-- VA File Number -->
+      <div class="glass rounded-xl px-5 py-4 mb-6">
+        <label class="block text-slate-300 text-sm font-semibold mb-2 flex items-center gap-2">
+          <span class="w-5 h-5 rounded-full bg-indigo-600 text-white text-xs flex items-center justify-center font-bold">3</span>
+          VA File Number
+          <span class="text-slate-600 font-normal text-xs">(used for packet headers)</span>
+        </label>
+        <input id="inp-va-num" type="text" maxlength="12"
+          placeholder="e.g. 321469459"
+          class="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-white text-sm
+                 placeholder-slate-600 focus:outline-none focus:border-indigo-500 focus:bg-white/8
+                 tracking-wider font-mono"
+          oninput="chkReady()" />
+        <p class="text-slate-600 text-xs mt-1.5">Digits only — spaces and dashes are stripped automatically.</p>
+      </div>
+
+      <!-- Pipeline steps -->
+      <div class="glass rounded-xl px-5 py-4 mb-8 flex flex-wrap gap-x-4 gap-y-2 items-center justify-center text-xs text-slate-500">
+        <span class="flex items-center gap-1.5"><span class="text-indigo-400 font-semibold">①</span> Parse memo conditions</span>
+        <svg class="w-3 h-3 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+        <span class="flex items-center gap-1.5"><span class="text-indigo-400 font-semibold">②</span> Download PubMed PDFs</span>
+        <svg class="w-3 h-3 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+        <span class="flex items-center gap-1.5"><span class="text-indigo-400 font-semibold">③</span> Per-condition ESF fill + X mark</span>
+        <svg class="w-3 h-3 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+        <span class="flex items-center gap-1.5"><span class="text-green-400 font-semibold">④</span> Final_&lt;Condition&gt;_Packet.pdf each</span>
+      </div>
+
+      <!-- Signature warning — shown when no signature is saved -->
+      <div id="sig-warn-banner" class="hidden mb-5 px-4 py-3 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center gap-3">
+        <svg class="w-4 h-4 text-amber-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+        <span class="text-amber-300 text-sm flex-1">No signature saved — Section VI (19A) will be left blank.
+          <button onclick="showSettings()" class="underline hover:text-amber-200 ml-1">Add signature →</button>
+        </span>
+      </div>
+
+      <div class="text-center">
+        <button id="btn-run" class="btn-primary" disabled onclick="startParse()">Analyze &amp; Continue</button>
+        <p id="upload-hint" class="text-slate-600 text-xs mt-3">Upload both files to continue</p>
+      </div>
+      <div id="upload-error" class="hidden max-w-xl mx-auto mt-4 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm text-center"></div>
+    </section>
+
+    <!-- ══════════════════════════════════════════════════════
+         PARSING
+    ══════════════════════════════════════════════════════ -->
+    <section id="section-parsing" class="section">
+      <div class="glass rounded-2xl p-10 max-w-lg mx-auto text-center">
+        <div class="spinner mx-auto mb-5" style="width:32px;height:32px;border-width:3px"></div>
+        <p class="text-white font-semibold text-lg mb-1">Analyzing memorandum…</p>
+        <p class="text-slate-500 text-sm">Extracting conditions, veteran info, and research links</p>
+      </div>
+    </section>
+
+    <!-- ══════════════════════════════════════════════════════
+         CONFIRM CONDITIONS
+    ══════════════════════════════════════════════════════ -->
+    <section id="section-confirm" class="section">
+      <div class="mb-8">
+        <div class="flex items-center gap-2 mb-1">
+          <div class="w-2 h-2 rounded-full bg-indigo-400"></div>
+          <span class="text-indigo-400 text-sm font-medium">Memorandum analyzed</span>
+        </div>
+        <h2 class="text-3xl font-bold text-white">Review Extracted Conditions</h2>
+        <p class="text-slate-400 text-sm mt-1">Veteran: <span id="conf-vet" class="text-white font-medium"></span>
+          <span id="conf-va-num" class="ml-3 text-slate-500 text-xs"></span>
+        </p>
+      </div>
+
+      <div class="glass rounded-2xl p-6 mb-5">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-white font-semibold flex items-center gap-2">
+            <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+            Claimed Conditions
+          </h3>
+          <span class="text-slate-500 text-xs">One packet will be generated per condition</span>
+        </div>
+
+        <div id="condition-cards" class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4"></div>
+
+        <div id="no-cond-warn" class="hidden px-4 py-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 text-sm mb-3">
+          No conditions detected. Add them manually below.
+        </div>
+
+        <div class="flex gap-2">
+          <input id="manual-cond" type="text" placeholder="Add condition manually…"
+            class="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500"
+            onkeydown="if(event.key==='Enter') addManual()" />
+          <button onclick="addManual()" class="px-4 py-2 rounded-lg bg-indigo-600/30 border border-indigo-500/40 text-indigo-300 text-sm font-medium hover:bg-indigo-600/50 transition-colors">Add</button>
+        </div>
+      </div>
+
+      <!-- ESF + research info -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5">
+        <div class="glass rounded-xl px-5 py-4 flex items-center gap-3">
+          <div class="w-8 h-8 rounded-lg bg-green-600/20 flex items-center justify-center flex-shrink-0">
+            <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+          </div>
+          <div>
+            <p class="text-white text-sm font-medium">ESF ready</p>
+            <p id="conf-esf-name" class="text-slate-500 text-xs truncate max-w-[180px]"></p>
+          </div>
+        </div>
+        <div class="glass rounded-xl px-5 py-4 flex items-center gap-3">
+          <div class="w-8 h-8 rounded-lg bg-indigo-600/20 flex items-center justify-center flex-shrink-0">
+            <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>
+          </div>
+          <div>
+            <p class="text-white text-sm font-medium"><span id="conf-url-count">0</span> PubMed article(s)</p>
+            <p class="text-slate-500 text-xs">Original PDFs from PMC Open Access</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Debug accordion -->
+      <details class="glass rounded-xl mb-6 overflow-hidden">
+        <summary class="flex items-center justify-between px-5 py-3 text-slate-400 text-sm font-medium hover:text-white transition-colors">
+          <span class="flex items-center gap-2">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>
+            Extraction debug log
+          </span>
+          <svg class="chev w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+        </summary>
+        <div class="debug-box px-4 py-3" id="debug-log"></div>
+      </details>
+
+      <div class="flex items-center justify-between">
+        <button onclick="resetApp()" class="btn-secondary">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+          Back
+        </button>
+        <button id="btn-confirm" class="btn-primary" onclick="startProcess()">Confirm &amp; Build Packets</button>
+      </div>
+    </section>
+
+    <!-- ══════════════════════════════════════════════════════
+         PROCESSING
+    ══════════════════════════════════════════════════════ -->
+    <section id="section-processing" class="section">
+      <div class="glass rounded-2xl p-8 max-w-2xl mx-auto">
+        <div class="flex items-center gap-4 mb-6">
+          <div class="spinner"></div>
+          <div>
+            <h2 class="text-white font-semibold text-lg">Building evidence packets…</h2>
+            <p id="stage-label" class="text-slate-400 text-sm">Starting…</p>
+          </div>
+        </div>
+
+        <div class="progress-track mb-6">
+          <div class="progress-fill" id="progress-fill" style="width:8%"></div>
+        </div>
+
+        <!-- Stage stepper -->
+        <div class="flex items-center gap-3 mb-6 flex-wrap">
+          <div class="flex items-center gap-2 text-xs">
+            <div class="stage-dot" id="dot-downloading"></div>
+            <span id="lbl-downloading" class="text-slate-500">Download PDFs</span>
+          </div>
+          <div class="w-6 h-px bg-white/10"></div>
+          <div class="flex items-center gap-2 text-xs">
+            <div class="stage-dot" id="dot-filling_esf"></div>
+            <span id="lbl-filling_esf" class="text-slate-500">Fill ESF (per condition)</span>
+          </div>
+          <div class="w-6 h-px bg-white/10"></div>
+          <div class="flex items-center gap-2 text-xs">
+            <div class="stage-dot" id="dot-merging"></div>
+            <span id="lbl-merging" class="text-slate-500">Merge &amp; Add Headers</span>
+          </div>
+        </div>
+
+        <!-- Active condition badge -->
+        <div id="active-cond-row" class="hidden mb-4 flex items-center gap-2 text-xs text-slate-400">
+          <span>Building:</span>
+          <span id="active-cond-badge" class="pill pill-blue"></span>
+        </div>
+
+        <div class="log-box rounded-lg p-3" id="log-box"></div>
+      </div>
+    </section>
+
+    <!-- ══════════════════════════════════════════════════════
+         RESULTS
+    ══════════════════════════════════════════════════════ -->
+    <section id="section-results" class="section">
+
+      <div class="flex items-start justify-between mb-8">
+        <div>
+          <div class="flex items-center gap-2 mb-1">
+            <div class="w-2 h-2 rounded-full bg-green-400"></div>
+            <span class="text-green-400 text-sm font-medium">All packets complete</span>
+          </div>
+          <h2 id="res-vet" class="text-3xl font-bold text-white"></h2>
+          <p id="res-va-num" class="text-slate-500 text-sm mt-0.5"></p>
+        </div>
+        <button onclick="resetApp()" class="btn-secondary mt-1">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+          New upload
+        </button>
+      </div>
+
+      <!-- Stats -->
+      <div class="grid grid-cols-3 gap-4 mb-8">
+        <div class="stat-card">
+          <div id="stat-cond" class="text-3xl font-bold text-indigo-400 mb-1">–</div>
+          <div class="text-slate-500 text-xs uppercase tracking-wide">Conditions</div>
+        </div>
+        <div class="stat-card">
+          <div id="stat-dl" class="text-3xl font-bold text-green-400 mb-1">–</div>
+          <div class="text-slate-500 text-xs uppercase tracking-wide">PDFs Downloaded</div>
+        </div>
+        <div class="stat-card">
+          <div id="stat-skip" class="text-3xl font-bold text-slate-500 mb-1">–</div>
+          <div class="text-slate-500 text-xs uppercase tracking-wide">Paywalled / Skipped</div>
+        </div>
+      </div>
+
+      <!-- Per-condition packet download grid -->
+      <div class="mb-8">
+        <h3 class="text-white font-semibold mb-4 flex items-center gap-2">
+          <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+          Evidence Packets — One Per Condition
+        </h3>
+        <div id="packet-grid" class="grid grid-cols-1 sm:grid-cols-2 gap-4"></div>
+      </div>
+
+      <!-- Research articles -->
+      <div class="glass rounded-2xl p-6 mb-6">
+        <h3 class="text-white font-semibold mb-4 flex items-center gap-2">
+          <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+          Research Articles
+        </h3>
+        <div id="article-list"></div>
+      </div>
+
+    </section>
+
+    <!-- ══════════════════════════════════════════════════════
+         ERROR
+    ══════════════════════════════════════════════════════ -->
+    <section id="section-error" class="section">
+      <div class="glass rounded-2xl p-8 max-w-xl mx-auto text-center">
+        <div class="w-14 h-14 mx-auto mb-4 rounded-full bg-red-500/15 flex items-center justify-center">
+          <svg class="w-7 h-7 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        </div>
+        <h2 class="text-white font-semibold text-lg mb-2">Something went wrong</h2>
+        <p id="error-msg" class="text-slate-400 text-sm mb-6"></p>
+        <button onclick="resetApp()" class="btn-primary">Try Again</button>
+      </div>
+    </section>
+
+    <!-- ══════════════════════════════════════════════════════
+         SETTINGS — Signature management
+    ══════════════════════════════════════════════════════ -->
+    <section id="section-settings" class="section">
+      <div class="mb-8 flex items-center gap-3">
+        <button onclick="show(prevSection||'upload')" class="btn-secondary">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+          Back
+        </button>
+        <div>
+          <h2 class="text-2xl font-bold text-white">Settings</h2>
+          <p class="text-slate-500 text-sm mt-0.5">Manage the Jeff POA signature used in ESF packets</p>
+        </div>
+      </div>
+
+      <!-- Signature card -->
+      <div class="glass rounded-2xl p-6 mb-5">
+        <div class="flex items-center justify-between mb-5">
+          <h3 class="text-white font-semibold flex items-center gap-2">
+            <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/></svg>
+            POA Signature (Jeff)
+          </h3>
+          <span id="sig-status-badge" class="pill pill-gray">Checking…</span>
+        </div>
+
+        <!-- Current signature preview -->
+        <div id="sig-preview-box" class="hidden mb-5 p-4 rounded-xl bg-white/5 border border-white/10 text-center">
+          <img id="sig-preview-img" src="" alt="Signature preview"
+            class="max-h-16 mx-auto" style="filter:invert(1) brightness(0.85)" />
+          <p class="text-slate-500 text-xs mt-2">Saved signature — used automatically in all ESF packets</p>
+        </div>
+
+        <!-- Upload dropzone -->
+        <div id="dz-sig" class="drop-zone p-6 text-center mb-4"
+          onclick="document.getElementById('inp-sig').click()">
+          <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center">
+            <svg class="w-5 h-5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+          </div>
+          <p class="text-white text-sm font-medium" id="sig-dz-label">Drop signature image here</p>
+          <p class="text-slate-500 text-xs mt-0.5">PNG, JPG, GIF, or WebP — transparent PNG works best</p>
+          <input type="file" id="inp-sig" accept=".png,.jpg,.jpeg,.gif,.webp" style="display:none"
+            onchange="sigFileChosen(this.files[0])" />
+        </div>
+
+        <div id="sig-upload-err" class="hidden mb-3 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm"></div>
+
+        <div class="flex gap-3">
+          <button id="btn-save-sig" onclick="saveSig()" disabled
+            class="btn-primary flex-1 text-sm py-2.5">Save Signature</button>
+          <button id="btn-del-sig" onclick="deleteSig()"
+            class="btn-secondary text-sm">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+            Remove
+          </button>
+        </div>
+      </div>
+
+      <!-- Date preview -->
+      <div class="glass rounded-xl px-5 py-4 text-sm text-slate-400 flex items-center gap-3">
+        <svg class="w-4 h-4 text-indigo-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+        <span>Field 19B (Date Signed) is filled automatically with <strong class="text-white" id="settings-today"></strong> each time packets are generated.</span>
+      </div>
+    </section>
+
+  </main>
+
+  <script>
+    let jobId = null, pollTimer = null, memoFile = null, esfFile = null;
+    let prevSection = 'upload';
+
+    function show(id) {
+      if (id !== 'settings') prevSection = id;
+      document.querySelectorAll('.section').forEach(s => s.classList.remove('visible'));
+      document.getElementById('section-' + id).classList.add('visible');
+    }
+
+    // ── Drop zones ─────────────────────────────────────────────────
+    function wireDZ(dzId, inpId, cb) {
+      const dz = document.getElementById(dzId), inp = document.getElementById(inpId);
+      dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('dragover'); });
+      dz.addEventListener('dragleave', ()  => dz.classList.remove('dragover'));
+      dz.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('dragover'); if (e.dataTransfer.files[0]) cb(e.dataTransfer.files[0]); });
+      inp.addEventListener('change', () => { if (inp.files[0]) cb(inp.files[0]); });
+    }
+    wireDZ('dz-memo', 'inp-memo', f => {
+      memoFile = f;
+      document.getElementById('memo-label').textContent = f.name;
+      document.getElementById('memo-sub').textContent   = fmtB(f.size);
+      document.getElementById('dz-memo').classList.add('has-file');
+      chkReady();
+    });
+    wireDZ('dz-esf', 'inp-esf', f => {
+      esfFile = f;
+      document.getElementById('esf-label').textContent = f.name;
+      document.getElementById('esf-sub').textContent   = fmtB(f.size);
+      document.getElementById('dz-esf').classList.add('has-file');
+      chkReady();
+    });
+    function chkReady() {
+      const ok = memoFile && esfFile;
+      document.getElementById('btn-run').disabled = !ok;
+      document.getElementById('upload-hint').textContent =
+        memoFile && !esfFile ? 'Upload the ESF PDF to continue' :
+        !memoFile && esfFile ? 'Upload the memorandum to continue' :
+        ok                   ? 'Both files ready — click Analyze & Continue' :
+                               'Upload both files to continue';
+    }
+    function fmtB(b) {
+      if (b < 1024) return b + ' B';
+      if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+      return (b/1048576).toFixed(1) + ' MB';
+    }
+
+    // ── Phase 1: parse memo ────────────────────────────────────────
+    async function startParse() {
+      if (!memoFile) return;
+      document.getElementById('btn-run').disabled = true;
+      show('parsing');
+
+      const fd = new FormData(); fd.append('file', memoFile);
+      let resp, data;
+      try { resp = await fetch('/upload', { method:'POST', body:fd }); data = await resp.json(); }
+      catch(e) { showError('Network error: ' + e.message); return; }
+      if (!resp.ok) { showError(data.error || 'Upload failed'); return; }
+
+      jobId = data.job_id;
+
+      if (esfFile) {
+        const fd2 = new FormData(); fd2.append('file', esfFile);
+        try { await fetch('/upload-esf/' + jobId, { method:'POST', body:fd2 }); }
+        catch(e) { console.warn('ESF upload error:', e); }
+      }
+
+      renderConfirm(data);
+      show('confirm');
+    }
+
+    // ── Confirm ────────────────────────────────────────────────────
+    function renderConfirm(d) {
+      document.getElementById('conf-vet').textContent = d.vet_name || 'Unknown Veteran';
+      // Prefer the manually-entered VA number; fall back to auto-extracted
+      const manualVa = (document.getElementById('inp-va-num')?.value || '').replace(/[^0-9]/g, '');
+      const displayVa = manualVa || d.va_file_number || '';
+      document.getElementById('conf-va-num').textContent = displayVa ? `VA File # ${displayVa}` : '';
+      document.getElementById('conf-url-count').textContent= d.url_count ?? 0;
+      document.getElementById('conf-esf-name').textContent = esfFile ? esfFile.name : '(none)';
+
+      const container = document.getElementById('condition-cards');
+      container.innerHTML = '';
+      const conds = d.illnesses_clean || [];
+      document.getElementById('no-cond-warn').classList.toggle('hidden', conds.length > 0);
+      conds.forEach(c => addCondCard(c, true));
+
+      const dbg = document.getElementById('debug-log');
+      dbg.innerHTML = (d.extraction_debug || []).map(line => {
+        let cls = 'text-slate-500';
+        if (line.startsWith('[accept]'))     cls = 'text-green-400';
+        if (line.startsWith('[skip]'))       cls = 'text-red-400';
+        if (line.startsWith('[dedup]'))      cls = 'text-amber-400';
+        if (line.startsWith('[memo-title]')) cls = 'text-indigo-300';
+        if (line.startsWith('[result]'))     cls = 'text-white font-semibold';
+        return `<div class="${cls}">${esc(line)}</div>`;
+      }).join('');
+
+      refreshConfirmBtn();
+    }
+
+    function addCondCard(cond, checked) {
+      const container = document.getElementById('condition-cards');
+      const id = 'c' + Math.random().toString(36).slice(2);
+      const lbl = document.createElement('label');
+      lbl.className = 'condition-card ' + (checked ? 'selected' : 'deselected');
+      lbl.setAttribute('for', id);
+      lbl.innerHTML = `
+        <div class="flex items-center gap-3 w-full">
+          <input type="checkbox" id="${id}" ${checked?'checked':''} onchange="toggleCond(this)" />
+          <span class="text-white text-sm font-medium flex-1">${esc(cond)}</span>
+          <button type="button" onclick="removeCond(this)" class="text-slate-600 hover:text-red-400 transition-colors" title="Remove">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+          </button>
+        </div>`;
+      container.appendChild(lbl);
+    }
+    function toggleCond(cb) {
+      const card = cb.closest('.condition-card');
+      card.classList.toggle('selected', cb.checked);
+      card.classList.toggle('deselected', !cb.checked);
+      refreshConfirmBtn();
+    }
+    function removeCond(btn) { btn.closest('.condition-card').remove(); refreshConfirmBtn(); }
+    function addManual() {
+      const inp = document.getElementById('manual-cond'), val = inp.value.trim();
+      if (!val) return;
+      document.getElementById('no-cond-warn').classList.add('hidden');
+      addCondCard(val, true); inp.value = ''; refreshConfirmBtn();
+    }
+    function getSelected() {
+      return [...document.querySelectorAll('#condition-cards input[type=checkbox]:checked')]
+        .map(cb => cb.closest('.condition-card').querySelector('span').textContent.trim());
+    }
+    function refreshConfirmBtn() {
+      const n = getSelected().length, btn = document.getElementById('btn-confirm');
+      btn.disabled = n === 0;
+      btn.textContent = n > 0
+        ? `Confirm & Build ${n} Packet${n!==1?'s':''}`
+        : 'Select at least one condition';
+    }
+
+    // ── Phase 2: start pipeline ────────────────────────────────────
+    async function startProcess() {
+      const confirmed = getSelected(); if (!confirmed.length) return;
+      document.getElementById('btn-confirm').disabled = true;
+      show('processing');
+
+      // Collect the manually-entered VA file number (strip non-digits)
+      const rawVaNum = document.getElementById('inp-va-num')?.value || '';
+      const vaNum    = rawVaNum.replace(/[^0-9]/g, '');
+
+      let resp;
+      try {
+        resp = await fetch('/process/' + jobId, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({
+            confirmed_illnesses: confirmed,
+            va_file_number:      vaNum || undefined,
+          }),
+        });
+      } catch(e) { showError('Network error: ' + e.message); return; }
+      if (!resp.ok) { const d = await resp.json().catch(()=>({})); showError(d.error || 'Failed to start'); return; }
+
+      startPolling();
+    }
+
+    // ── Polling ────────────────────────────────────────────────────
+    function startPolling() { pollTimer = setInterval(pollStatus, 1500); }
+    async function pollStatus() {
+      if (!jobId) return;
+      let d;
+      try { d = await (await fetch('/status/' + jobId)).json(); } catch { return; }
+      updateProcUI(d);
+      if (d.status === 'done')  { clearInterval(pollTimer); renderResults(d); show('results'); }
+      if (d.status === 'error') { clearInterval(pollTimer); showError(d.error || 'Unknown error'); }
+    }
+
+    const STAGES = {
+      downloading: { pct:30, label:'Downloading research PDFs from PMC…' },
+      filling_esf: { pct:65, label:'Filling ESF for each condition…' },
+      merging:     { pct:88, label:'Merging + adding page headers…' },
+      done:        { pct:100,label:'Complete' },
+    };
+    const STAGE_ORDER = ['downloading','filling_esf','merging','done'];
+
+    function updateProcUI(d) {
+      const stage = d.stage || 'downloading';
+      const info  = STAGES[stage] || { pct:50, label:'Processing…' };
+      document.getElementById('stage-label').textContent   = info.label;
+      document.getElementById('progress-fill').style.width = info.pct + '%';
+
+      const idx = STAGE_ORDER.indexOf(stage);
+      STAGE_ORDER.forEach((s, i) => {
+        const dot = document.getElementById('dot-' + s);
+        const lbl = document.getElementById('lbl-' + s);
+        if (!dot || !lbl) return;
+        dot.classList.remove('active','done'); lbl.classList.remove('text-white','text-slate-500');
+        if (i < idx)       { dot.classList.add('done');   lbl.classList.add('text-slate-400'); }
+        else if (i === idx){ dot.classList.add('active');  lbl.classList.add('text-white'); }
+        else               { lbl.classList.add('text-slate-500'); }
+      });
+
+      // Active condition badge
+      const cond = d.current_condition || '';
+      const row  = document.getElementById('active-cond-row');
+      const badge = document.getElementById('active-cond-badge');
+      if (cond && (stage === 'filling_esf' || stage === 'merging')) {
+        row.classList.remove('hidden'); badge.textContent = cond;
+      } else {
+        row.classList.add('hidden');
+      }
+
+      const box = document.getElementById('log-box');
+      box.innerHTML = (d.logs || []).map(l => `<div class="text-slate-400">${esc(l)}</div>`).join('');
+      box.scrollTop = box.scrollHeight;
+    }
+
+    // ── Results ────────────────────────────────────────────────────
+    function renderResults(d) {
+      document.getElementById('res-vet').textContent    = d.vet_name || 'Unknown Veteran';
+      document.getElementById('res-va-num').textContent = d.va_file_number ? `VA File # ${d.va_file_number}` : '';
+      document.getElementById('stat-cond').textContent  = (d.illnesses || []).length;
+      document.getElementById('stat-dl').textContent    = d.dl_summary?.downloaded ?? '–';
+      document.getElementById('stat-skip').textContent  = d.dl_summary?.skipped    ?? '–';
+
+      // Per-condition packet cards
+      const grid    = document.getElementById('packet-grid');
+      grid.innerHTML = '';
+      const packets  = d.condition_packets || {};
+      const ifiles   = d.illness_files     || {};
+
+      (d.illnesses || []).forEach(cond => {
+        const hasPacket = !!packets[cond];
+        const pdfCount  = (ifiles[cond] || []).length;
+        const card      = document.createElement('div');
+        card.className  = 'packet-card';
+
+        card.innerHTML = `
+          <div class="flex items-start justify-between">
+            <div>
+              <h4 class="text-white font-semibold text-base">${esc(cond)}</h4>
+              <p class="text-slate-500 text-xs mt-0.5">
+                ESF + ${pdfCount} research PDF${pdfCount!==1?'s':''}
+                · headers on pages 3+
+              </p>
+            </div>
+            <span class="pdf-count">${pdfCount} PDF${pdfCount!==1?'s':''}</span>
+          </div>
+          <div class="text-xs text-slate-600 font-mono">
+            Final_${esc(cond.replace(/ /g,'_'))}_Packet.pdf
+          </div>`;
+
+        if (hasPacket) {
+          const btn = document.createElement('button');
+          btn.className = 'btn-dl';
+          btn.innerHTML = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg> Download Packet`;
+          btn.onclick = () => downloadPacket(cond);
+          card.appendChild(btn);
+        } else {
+          const note = document.createElement('p');
+          note.className = 'text-slate-600 text-xs italic text-center py-2';
+          note.textContent = 'No ESF provided — research PDFs saved to folder';
+          card.appendChild(note);
+        }
+        grid.appendChild(card);
+      });
+
+      if (!d.illnesses?.length) {
+        grid.innerHTML = '<p class="text-slate-500 text-sm">No conditions processed.</p>';
+      }
+
+      // Articles
+      const al = document.getElementById('article-list');
+      al.innerHTML = '';
+      (d.article_results || []).forEach((a, i) => {
+        const div   = document.createElement('div');
+        div.className = 'article-row';
+        const pmid  = a.pmid ? `PMID ${a.pmid}` : `Article ${i+1}`;
+        const badge = a.downloaded
+          ? `<span class="pill pill-green"><svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>Downloaded</span>`
+          : `<span class="pill pill-gray">Paywalled / No PDF</span>`;
+        div.innerHTML = `<div><p class="text-white text-sm font-medium">${pmid}</p><a href="${esc(a.url)}" target="_blank" class="text-indigo-400 text-xs hover:underline">${esc(a.url)}</a></div>${badge}`;
+        al.appendChild(div);
+      });
+      if (!d.article_results?.length) al.innerHTML = '<p class="text-slate-500 text-sm">No PubMed articles found.</p>';
+    }
+
+    function downloadPacket(condition) {
+      if (jobId) window.location = '/final/' + jobId + '/' + encodeURIComponent(condition);
+    }
+
+    // ── Error / Reset ──────────────────────────────────────────────
+    function showError(msg) {
+      document.getElementById('error-msg').textContent = msg; show('error');
+    }
+    function resetApp() {
+      if (pollTimer) clearInterval(pollTimer);
+      jobId = null; memoFile = null; esfFile = null;
+      document.getElementById('inp-memo').value = '';
+      document.getElementById('inp-esf').value  = '';
+      const vaInp = document.getElementById('inp-va-num');
+      if (vaInp) vaInp.value = '';
+      document.getElementById('dz-memo').classList.remove('has-file');
+      document.getElementById('dz-esf').classList.remove('has-file');
+      document.getElementById('memo-label').textContent = 'Drop .docx or .pdf';
+      document.getElementById('memo-sub').textContent   = 'Conditions extracted from this file only';
+      document.getElementById('esf-label').textContent  = 'Drop .pdf ESF here';
+      document.getElementById('esf-sub').textContent    = 'One filled copy created per condition';
+      document.getElementById('btn-run').disabled = true;
+      document.getElementById('upload-hint').textContent = 'Upload both files to continue';
+      document.getElementById('log-box').innerHTML = '';
+      document.getElementById('progress-fill').style.width = '8%';
+      document.getElementById('condition-cards').innerHTML = '';
+      show('upload');
+    }
+
+    function esc(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    // ── Settings / Signature ────────────────────────────────────────
+    let pendingSigFile = null;
+
+    function showSettings() {
+      loadSigStatus();
+      const td = document.getElementById('settings-today');
+      if (td) td.textContent = new Date().toLocaleDateString('en-US', {month:'2-digit',day:'2-digit',year:'numeric'}).replace(/\//g,'-');
+      show('settings');
+    }
+
+    async function loadSigStatus() {
+      let d;
+      try { d = await (await fetch('/admin/signature-status')).json(); } catch { return; }
+      _applySigStatus(d.exists);
+    }
+
+    function _applySigStatus(exists) {
+      const badge    = document.getElementById('sig-status-badge');
+      const dot      = document.getElementById('sig-dot');
+      const warn     = document.getElementById('sig-warn-banner');
+      const preview  = document.getElementById('sig-preview-box');
+      const img      = document.getElementById('sig-preview-img');
+
+      if (exists) {
+        if (badge)   { badge.textContent = 'Signature saved'; badge.className = 'pill pill-green'; }
+        if (dot)     dot.classList.add('hidden');
+        if (warn)    warn.classList.add('hidden');
+        if (preview) preview.classList.remove('hidden');
+        if (img)     img.src = '/static/signatures/jeff_signature.png?t=' + Date.now();
+      } else {
+        if (badge)   { badge.textContent = 'No signature'; badge.className = 'pill pill-amber'; }
+        if (dot)     dot.classList.remove('hidden');
+        if (warn)    warn.classList.remove('hidden');
+        if (preview) preview.classList.add('hidden');
+      }
+    }
+
+    function sigFileChosen(file) {
+      if (!file) return;
+      pendingSigFile = file;
+      const lbl = document.getElementById('sig-dz-label');
+      if (lbl) lbl.textContent = file.name;
+      document.getElementById('dz-sig')?.classList.add('has-file');
+      document.getElementById('btn-save-sig').disabled = false;
+    }
+
+    async function saveSig() {
+      if (!pendingSigFile) return;
+      const errBox = document.getElementById('sig-upload-err');
+      errBox.classList.add('hidden');
+      const fd = new FormData();
+      fd.append('file', pendingSigFile);
+      let resp;
+      try { resp = await fetch('/admin/signature', { method:'POST', body:fd }); }
+      catch(e) { errBox.textContent = 'Network error: ' + e.message; errBox.classList.remove('hidden'); return; }
+      const data = await resp.json().catch(()=>({}));
+      if (!resp.ok) { errBox.textContent = data.error || 'Upload failed'; errBox.classList.remove('hidden'); return; }
+      pendingSigFile = null;
+      document.getElementById('btn-save-sig').disabled = true;
+      document.getElementById('dz-sig')?.classList.remove('has-file');
+      const lbl = document.getElementById('sig-dz-label');
+      if (lbl) lbl.textContent = 'Drop signature image here';
+      _applySigStatus(true);
+    }
+
+    async function deleteSig() {
+      if (!confirm('Remove the saved signature?')) return;
+      try { await fetch('/admin/signature', { method:'DELETE' }); } catch {}
+      _applySigStatus(false);
+    }
+
+    // Check signature status on page load
+    window.addEventListener('DOMContentLoaded', () => {
+      loadSigStatus();
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments / Replit libs
+.pythonlibs/
+.venv/
+venv/
+env/
+
+# Output / generated packets
+output/
+Anthony Novak/
+
+# Uploaded user files (runtime only)
+uploads/
+
+# Spurious files
+-r
+
+# Uploaded / sample files (keep template ESF only)
+attached_assets/
+
+# Node (renderer worker local deps)
+node_modules/
+package-lock.json
+
+# Replit internals
+.local/
+.cache/
+.upm/
+.config/
+.agents/
+
+# Chromium crash dumps
+*.dmp
+*.meta
+
+# Project export zip
+project_export.zip
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / env
+.env
+*.env
