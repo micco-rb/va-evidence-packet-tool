@@ -252,15 +252,30 @@ def _pipeline(job_id: str, confirmed: list[str]):
 
         log(f"Downloaded: {dl_results['downloaded']}  |  Skipped: {dl_results['skipped']}")
 
-        # Build per-condition PDF lists by scanning ONLY each condition's isolated
-        # subfolder.  Because every folder is job-scoped and condition-scoped, a
-        # PDF from Sleep Apnea can never appear in the Hypertension list.
-        illness_files: dict[str, list[str]] = {}
-        for cond in confirmed:
-            folder = cond_folders[cond]
-            illness_files[cond] = (
-                sorted(str(p) for p in folder.glob("*.pdf"))
-            )
+        # ── Build per-condition successful_pdfs from exact saved paths ────────
+        # Uses the saved_paths returned by the downloader for each URL so that
+        # the merge stage never relies on a folder scan or re-derivation.
+        successful_pdfs: dict[str, list[str]] = {cond: [] for cond in confirmed}
+
+        for entry in dl_results["results"]:
+            if entry.get("downloaded") and entry.get("saved_paths"):
+                cond = url_to_cond.get(entry["url"], confirmed[0])
+                for p in entry["saved_paths"]:
+                    if Path(p).exists():
+                        successful_pdfs[cond].append(p)
+                        print(f"[render-success] {p}", flush=True)
+                    else:
+                        print(f"[render-fail] downloaded=True but file missing: {p}",
+                              flush=True)
+            else:
+                print(f"[render-fail] preserving prior successes — "
+                      f"url={entry['url']!r} downloaded={entry.get('downloaded')}",
+                      flush=True)
+
+        # Keep illness_files for UI/status reporting only (not used for merge)
+        illness_files: dict[str, list[str]] = {
+            cond: successful_pdfs[cond] for cond in confirmed
+        }
 
         article_results: list[dict] = []
         for entry in dl_results["results"]:
@@ -279,7 +294,13 @@ def _pipeline(job_id: str, confirmed: list[str]):
         if esf_path and Path(esf_path).exists():
             for cond in confirmed:
                 slug        = _cond_slug(cond)
-                cond_pdfs    = illness_files.get(cond, [])
+                # Merge uses ONLY the directly-tracked successful PDF list —
+                # never recalculated, never overwritten by a later failure.
+                cond_pdfs = successful_pdfs.get(cond, [])
+
+                print(f"[merge] condition={cond!r}", flush=True)
+                print(f"[merge] successful_pdfs={cond_pdfs}", flush=True)
+
                 # Only include articles that were downloaded FOR this condition
                 cond_entries = [
                     a for a in article_results
