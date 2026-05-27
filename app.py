@@ -752,6 +752,98 @@ def retry_article(job_id: str):
                        error="Render failed — PMC may be blocking this IP")
 
 
+# ── Replace failed article URL and retry ──────────────────────────────────
+
+@app.route("/replace-article-url/<job_id>", methods=["POST"])
+def replace_article_url(job_id: str):
+    """
+    Replace a failed article's URL with a new one and retry the download.
+    Only that article is re-attempted; successful PDFs and other conditions
+    are untouched.  On success, the affected condition packet is rebuilt.
+    """
+    j = _job(job_id)
+    if not j:
+        return jsonify(error="Job not found"), 404
+
+    data    = request.get_json(silent=True) or {}
+    cond    = data.get("condition", "").strip()
+    old_url = data.get("old_url", "").strip()
+    new_url = data.get("new_url", "").strip()
+
+    if not cond or not new_url:
+        return jsonify(error="condition and new_url are required"), 400
+    if not new_url.startswith(("http://", "https://")):
+        return jsonify(error="new_url must be a valid http/https URL"), 400
+
+    cond_folder = OUTPUT_DIR / job_id / "research" / _cond_slug(cond)
+    cond_folder.mkdir(parents=True, exist_ok=True)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        dl = loop.run_until_complete(
+            downloader.run_downloads([(new_url, [str(cond_folder)])])
+        )
+    finally:
+        loop.close()
+
+    entry = dl["results"][0] if dl.get("results") else {}
+    ok    = entry.get("downloaded", False)
+
+    if ok:
+        with _lock:
+            if job_id in jobs:
+                ifiles = jobs[job_id].setdefault("illness_files", {})
+                ifiles.setdefault(cond, [])
+                for p in entry.get("saved_paths", []):
+                    if Path(p).exists() and p not in ifiles[cond]:
+                        ifiles[cond].append(p)
+                # Update article_results — replace old_url entry if found,
+                # otherwise append a new entry for the replacement URL
+                updated = False
+                for a in jobs[job_id].get("article_results", []):
+                    if a["url"] == old_url:
+                        a["url"]         = new_url
+                        a["status"]      = "ok"
+                        a["downloaded"]  = True
+                        a["saved_paths"] = entry.get("saved_paths", [])
+                        a["error"]       = ""
+                        updated = True
+                        break
+                if not updated:
+                    m    = re.search(r"/(\d+)/?$", new_url)
+                    pmid = m.group(1) if m else ""
+                    jobs[job_id].setdefault("article_results", []).append({
+                        "url":        new_url,
+                        "downloaded": True,
+                        "pmid":       pmid,
+                        "filename":   f"PMID_{pmid}.pdf" if pmid else "article.pdf",
+                        "status":     "ok",
+                        "conditions": [cond],
+                        "saved_paths": entry.get("saved_paths", []),
+                        "error":      "",
+                    })
+
+        _recalculate_dl_summary(job_id)
+
+        pdf_count = len(_job(job_id).get("illness_files", {}).get(cond, []))
+        has_esf   = bool(_job(job_id).get("filled_esf_paths", {}).get(cond))
+
+        if has_esf:
+            try:
+                _rebuild_packet(job_id, cond)
+                return jsonify(ok=True, packet_url=f"/final/{job_id}/{cond}",
+                               pdf_count=pdf_count)
+            except Exception as exc:
+                return jsonify(ok=False, error=str(exc)), 500
+        else:
+            return jsonify(ok=True, packet_url=None,
+                           pdf_count=pdf_count, has_esf=False)
+    else:
+        return jsonify(ok=False,
+                       error="Render failed — try a different URL or upload the PDF manually")
+
+
 # ── Accept a manually-uploaded replacement PDF ────────────────────────────
 
 @app.route("/upload-article-pdf/<job_id>", methods=["POST"])

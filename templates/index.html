@@ -90,6 +90,22 @@
     .btn-upload-art:hover  { background:rgba(245,158,11,.24); }
     .btn-upload-art:disabled { opacity:.45; cursor:not-allowed; }
 
+    .btn-replace {
+      display:inline-flex; align-items:center; gap:5px;
+      padding:4px 11px; border-radius:6px; font-size:11px; font-weight:500; cursor:pointer;
+      background:rgba(16,185,129,.11); border:1px solid rgba(16,185,129,.3); color:#6ee7b7;
+      transition:all .15s;
+    }
+    .btn-replace:hover  { background:rgba(16,185,129,.22); }
+    .btn-replace:disabled { opacity:.45; cursor:not-allowed; }
+
+    .replace-inp {
+      background:rgba(255,255,255,.06); border:1px solid rgba(99,102,241,.35);
+      border-radius:6px; padding:5px 8px; color:#e2e8f0; font-size:11px; width:100%;
+      outline:none; box-sizing:border-box;
+    }
+    .replace-inp:focus { border-color:rgba(99,102,241,.6); }
+
     /* Per-condition packet card */
     .packet-card {
       background: rgba(16,185,129,.05);
@@ -950,6 +966,11 @@
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
                 </svg>Retry
               </button>
+              <button class="btn-replace" data-url="${esc(a.url)}" data-cond="${esc(primaryCond)}" onclick="replaceLink(this)" title="Paste a replacement URL and retry only this article">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/>
+                </svg>Replace Link
+              </button>
               <a href="${esc(a.url)}" target="_blank" rel="noopener" class="btn-retry" style="text-decoration:none" title="Open article in your browser to read or print to PDF">
                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
@@ -1055,6 +1076,155 @@
         btn.classList.add('hidden');
       } else {
         btn.innerHTML = `<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>Retry All Failed`;
+      }
+    }
+
+    // ── Replace Link — inline URL replacement form ─────────────────
+
+    function _buildSuggestions(url) {
+      const s = [];
+      const pmcM = url.match(/PMC(\d+)/i);
+      if (pmcM) {
+        const id = pmcM[1];
+        const pdfEp = `https://pmc.ncbi.nlm.nih.gov/articles/PMC${id}/pdf/`;
+        if (pdfEp !== url) s.push({ label: 'PMC PDF', url: pdfEp });
+        const altPmc = `https://www.ncbi.nlm.nih.gov/pmc/articles/PMC${id}/`;
+        if (altPmc !== url) s.push({ label: 'Alt PMC', url: altPmc });
+        const pmcPage = `https://pmc.ncbi.nlm.nih.gov/articles/PMC${id}/`;
+        if (pmcPage !== url) s.push({ label: 'PMC Page', url: pmcPage });
+      }
+      const pmidM = url.match(/pubmed\.ncbi\.nlm\.nih\.gov\/(\d+)/);
+      if (pmidM) {
+        s.push({ label: 'PMC Search', url: `https://pmc.ncbi.nlm.nih.gov/search/?query=${pmidM[1]}` });
+      }
+      return s;
+    }
+
+    function replaceLink(btn) {
+      const origUrl = btn.dataset.url;
+      const cond    = btn.dataset.cond;
+      const row     = btn.closest('.article-row');
+      const col     = btn.closest('div[style*="flex-direction"]');
+
+      // Save original column HTML so Cancel can restore it
+      row.dataset.savedRightCol = col.outerHTML;
+
+      const sugg = _buildSuggestions(origUrl);
+      const inpId = 'rlinp_' + Math.random().toString(36).slice(2, 8);
+
+      const suggHtml = sugg.length ? `
+        <p class="text-slate-500 text-xs mt-1 mb-0.5">Suggestions:</p>
+        <div style="display:flex;flex-wrap:wrap;gap:4px">
+          ${sugg.map(s =>
+            `<button class="btn-replace" style="font-size:10px;padding:2px 7px"
+                     onclick="document.getElementById('${inpId}').value='${esc(s.url)}'">
+               ${esc(s.label)}
+             </button>`
+          ).join('')}
+        </div>` : '';
+
+      col.outerHTML = `
+        <div style="display:flex;flex-direction:column;gap:6px;min-width:240px;max-width:280px">
+          <p class="text-slate-400 text-xs">Paste replacement URL:</p>
+          <input id="${inpId}" class="replace-inp" type="url"
+                 value="${esc(origUrl)}"
+                 placeholder="https://…"
+                 onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('${inpId}_btn').click()}"
+          >
+          ${suggHtml}
+          <div style="display:flex;gap:6px;margin-top:2px">
+            <button id="${inpId}_btn" class="btn-replace"
+                    data-old-url="${esc(origUrl)}" data-cond="${esc(cond)}" data-inp-id="${inpId}"
+                    onclick="submitReplaceLink(this)">
+              <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+              </svg>Try URL
+            </button>
+            <button class="btn-upload-art"
+                    data-row-id="${row.dataset.url || ''}" onclick="cancelReplaceLink(this, '${esc(origUrl)}')">
+              Cancel
+            </button>
+          </div>
+        </div>`;
+
+      // Focus the input
+      const inp = document.getElementById(inpId);
+      if (inp) { inp.focus(); inp.select(); }
+    }
+
+    function cancelReplaceLink(btn, origUrl) {
+      // Find the article row by the original URL and restore saved HTML
+      const rows = document.querySelectorAll('.article-row');
+      for (const row of rows) {
+        if (row.dataset.url === origUrl && row.dataset.savedRightCol) {
+          const saved = row.dataset.savedRightCol;
+          const col = btn.closest('div[style*="flex-direction"]');
+          col.outerHTML = saved;
+          delete row.dataset.savedRightCol;
+          return;
+        }
+      }
+    }
+
+    async function submitReplaceLink(btn) {
+      const oldUrl = btn.dataset.oldUrl;
+      const cond   = btn.dataset.cond;
+      const inpId  = btn.dataset.inpId;
+      const inp    = document.getElementById(inpId);
+      const newUrl = (inp?.value || '').trim();
+
+      if (!newUrl || !newUrl.startsWith('http')) {
+        inp?.focus();
+        inp?.style && (inp.style.borderColor = 'rgba(239,68,68,.6)');
+        return;
+      }
+      if (inp) inp.style.borderColor = '';
+
+      btn.disabled = true;
+      btn.innerHTML = `<span class="spinner" style="width:12px;height:12px;border-width:1.5px"></span> Trying…`;
+
+      try {
+        const resp = await fetch(`/replace-article-url/${jobId}`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ condition: cond, old_url: oldUrl, new_url: newUrl }),
+        });
+        const data = await resp.json();
+
+        if (data.ok) {
+          // Find the article row and mark it as downloaded
+          const rows = document.querySelectorAll('.article-row');
+          for (const row of rows) {
+            if (row.dataset.url === oldUrl) {
+              row.classList.remove('failed-row');
+              delete row.dataset.savedRightCol;
+              const col = btn.closest('div[style*="flex-direction"]');
+              col.outerHTML = `<span class="pill pill-green" style="white-space:nowrap">
+                <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+                </svg>Downloaded</span>`;
+              // Update the displayed URL in the left column
+              const urlLink = row.querySelector('a.text-indigo-400');
+              if (urlLink && newUrl !== oldUrl) {
+                urlLink.href        = newUrl;
+                urlLink.textContent = newUrl;
+              }
+              break;
+            }
+          }
+          _updateStatCounters();
+          _refreshPacketCard(cond, data.packet_url, data.pdf_count);
+        } else {
+          btn.disabled = false;
+          btn.innerHTML = `<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>Try URL`;
+          if (inp) {
+            inp.style.borderColor = 'rgba(239,68,68,.6)';
+            inp.title = data.error || 'Render failed — try another URL';
+          }
+        }
+      } catch (e) {
+        btn.disabled = false;
+        btn.innerHTML = `<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>Try URL`;
       }
     }
 
