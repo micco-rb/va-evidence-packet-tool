@@ -104,6 +104,81 @@ _PDF_OPTS = dict(
                             left="0.65in", right="0.65in"),
 )
 
+# ── Interstitial / browser-check phrases ──────────────────────────────────────
+# Any of these in page body text means we caught a redirect/challenge page,
+# not the real article.  We must wait until they all disappear.
+_INTERSTITIAL_PHRASES = [
+    "checking your browser",
+    "automatically redirected",
+    "verifying you are human",
+    "just a moment",
+    "please wait",
+    "ddos protection",
+    "ray id",
+    "enable javascript",
+    "browser verification",
+]
+
+# JS expression passed to wait_for_function — returns true when the page no
+# longer contains any interstitial phrase (i.e. real content has loaded).
+_INTERSTITIAL_CLEAR_JS = """
+(phrases) => {
+    const txt = document.body ? document.body.innerText.toLowerCase() : '';
+    return !phrases.some(p => txt.includes(p));
+}
+"""
+
+
+def _wait_past_interstitial(page, interstitial_timeout_ms: int = 35_000) -> None:
+    """
+    Called after the initial goto().  If the page is showing a browser-check
+    interstitial (Cloudflare / NCBI / PubMed redirect), waits until:
+
+      1. All interstitial phrases disappear from the DOM body text, AND
+      2. The network goes idle again (real page finished loading).
+
+    If no interstitial is present this function returns immediately.
+    On timeout it logs a warning and continues — page.pdf() will still
+    capture whatever is visible.
+    """
+    # Fast path: read visible text and check for any interstitial phrase.
+    try:
+        body_text = page.inner_text("body", timeout=5_000).lower()
+    except Exception:
+        return                          # can't read body — skip check
+
+    found = [p for p in _INTERSTITIAL_PHRASES if p in body_text]
+    if not found:
+        return                          # no interstitial — nothing to wait for
+
+    print(f"  [pw] interstitial detected: {found}", flush=True)
+    print(f"  [pw] waiting up to {interstitial_timeout_ms // 1000}s for redirect to complete …",
+          flush=True)
+
+    # ── Wait for interstitial text to leave the DOM ────────────────────────
+    try:
+        page.wait_for_function(
+            _INTERSTITIAL_CLEAR_JS,
+            arg     = _INTERSTITIAL_PHRASES,
+            timeout = interstitial_timeout_ms,
+            polling = 500,               # check every 500 ms
+        )
+        print(f"  [pw] interstitial cleared  url={page.url!r}", flush=True)
+    except Exception as exc:
+        print(f"  [pw] interstitial wait ended ({exc}) — proceeding with current page",
+              flush=True)
+        return
+
+    # ── Wait for the real page to finish loading ───────────────────────────
+    try:
+        page.wait_for_load_state("networkidle", timeout=20_000)
+        print(f"  [pw] networkidle after redirect  url={page.url!r}", flush=True)
+    except Exception as exc:
+        print(f"  [pw] post-redirect networkidle timed out ({exc})", flush=True)
+
+    # Small extra settle so JS-rendered content (abstracts, etc.) paints fully
+    page.wait_for_timeout(2_000)
+
 
 # ── Core render function ───────────────────────────────────────────────────────
 
@@ -126,7 +201,7 @@ def _render_pdf(url: str, timeout: int = 60_000) -> bytes:
         page = context.new_page()
 
         try:
-            # Short human-like pause before navigation (≈ page-load intent delay)
+            # Short human-like pause before navigation
             page.wait_for_timeout(400)
 
             # ── Step 1: navigate ───────────────────────────────────────────
@@ -135,14 +210,21 @@ def _render_pdf(url: str, timeout: int = 60_000) -> bytes:
                 nav = page.goto(url, wait_until="networkidle", timeout=timeout)
                 print(f"  [pw] networkidle  http={nav.status if nav else '?'}", flush=True)
             except Exception as e:
-                print(f"  [pw] networkidle failed ({e}) — retrying domcontentloaded", flush=True)
+                print(f"  [pw] networkidle failed ({e}) — retrying domcontentloaded",
+                      flush=True)
                 nav = page.goto(url, wait_until="domcontentloaded", timeout=timeout)
-                print(f"  [pw] domcontentloaded  http={nav.status if nav else '?'}", flush=True)
+                print(f"  [pw] domcontentloaded  http={nav.status if nav else '?'}",
+                      flush=True)
 
-            # ── Step 2: let dynamic content settle ────────────────────────
-            page.wait_for_timeout(2_500)
+            # ── Step 2: interstitial / redirect guard ──────────────────────
+            # If PubMed (or Cloudflare) is showing a browser-check page,
+            # wait until the real article content appears before printing.
+            _wait_past_interstitial(page)
 
-            # ── Step 3: print to PDF ───────────────────────────────────────
+            # ── Step 3: final content-settle pause ─────────────────────────
+            page.wait_for_timeout(2_000)
+
+            # ── Step 4: print to PDF ───────────────────────────────────────
             print(f"  [pw] calling page.pdf() …", flush=True)
             pdf = page.pdf(**_PDF_OPTS)
             valid = pdf[:4] == b"%PDF" if pdf else False
