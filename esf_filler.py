@@ -389,12 +389,26 @@ def _try_acroform(
 
     writer = PdfWriter()
     writer.append(reader)
+
     # Apply updates to every page (some multi-page forms have fields on p2)
     for page in writer.pages:
         try:
             writer.update_page_form_field_values(page, updates)
         except Exception:
             pass
+
+    # Tell every conforming viewer (Acrobat, etc.) to regenerate field
+    # appearance streams on open.  pypdf sets /V but does NOT rebuild /AP,
+    # so without this flag checkboxes look visually empty in some viewers.
+    try:
+        from pypdf.generic import BooleanObject, NameObject
+        acroform = writer._root_object.get("/AcroForm")
+        if acroform is not None:
+            if hasattr(acroform, "get_object"):
+                acroform = acroform.get_object()
+            acroform[NameObject("/NeedAppearances")] = BooleanObject(True)
+    except Exception:
+        pass
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "wb") as fh:
@@ -526,17 +540,21 @@ def fill_esf_for_condition(
     """
     print(f"\n[fill-esf] condition={condition!r}")
 
-    # Step 1 — AcroForm: update field values (text fields, checkbox states).
-    # Even when this succeeds, we still run the visual overlay below because
-    # pypdf doesn't rebuild /AP appearance streams, leaving checkboxes invisible.
+    # Step 1 — AcroForm: fill native form fields (checkbox + describe text).
+    # /NeedAppearances=True is set inside _try_acroform so every conforming
+    # viewer regenerates visual appearances on open — no canvas overlay needed.
     acroform_ok = _try_acroform(esf_path, output_path, condition, research_entries)
 
-    # Step 2 — Visual overlay: always draw the explicit X mark + condition text.
-    # Source is the acroform-updated file (if it was written), otherwise original.
-    overlay_source = (output_path
-                      if acroform_ok and Path(output_path).exists()
-                      else esf_path)
-    _fill_overlay(overlay_source, output_path, condition, research_entries)
+    if acroform_ok:
+        # AcroForm fields were filled.  The PDF stays fully editable — no
+        # overlay, no content-stream burn, no flattening.
+        print(f"  [fill-esf] AcroForm path used — overlay skipped")
+        return output_path
+
+    # Step 2 — Overlay fallback ONLY for flat / scanned ESFs that have no
+    # AcroForm fields at all.  This branch is NOT reached for fillable VA forms.
+    print(f"  [fill-esf] No AcroForm fields — using visual overlay fallback")
+    _fill_overlay(esf_path, output_path, condition, research_entries)
     return output_path
 
 
@@ -580,10 +598,23 @@ def add_page_headers(
     overlay_reader = PdfReader(io.BytesIO(overlay_bytes))
     writer         = PdfWriter()
 
-    for i, orig_page in enumerate(reader.pages):
+    # append preserves the document-level AcroForm from the merged packet so
+    # the ESF form fields survive the header-stamp step.
+    writer.append(reader)
+    for i in range(len(writer.pages)):
         if i < len(overlay_reader.pages):
-            orig_page.merge_page(overlay_reader.pages[i])
-        writer.add_page(orig_page)
+            writer.pages[i].merge_page(overlay_reader.pages[i])
+
+    # Preserve /NeedAppearances through this final write.
+    try:
+        from pypdf.generic import BooleanObject, NameObject
+        acroform = writer._root_object.get("/AcroForm")
+        if acroform is not None:
+            if hasattr(acroform, "get_object"):
+                acroform = acroform.get_object()
+            acroform[NameObject("/NeedAppearances")] = BooleanObject(True)
+    except Exception:
+        pass
 
     Path(output_pdf).parent.mkdir(parents=True, exist_ok=True)
     with open(output_pdf, "wb") as fh:
@@ -652,9 +683,10 @@ def build_condition_packet(
     tmp_path = output_path + ".tmp.pdf"
     writer   = PdfWriter()
 
+    # append (not add_page) preserves the document-level AcroForm dict so
+    # the filled ESF stays a live, editable form through the final packet.
     esf_reader = PdfReader(filled_esf_path)
-    for page in esf_reader.pages:
-        writer.add_page(page)
+    writer.append(esf_reader)
     print(f"  [merge] ESF: {len(esf_reader.pages)} page(s)")
 
     valid_pdfs = sorted(p for p in research_pdf_paths if Path(p).exists())
@@ -1003,13 +1035,26 @@ def apply_signature_and_date(
     overlay_reader = PdfReader(io.BytesIO(overlay_bytes))
     writer         = PdfWriter()
 
-    for i, orig_page in enumerate(orig_reader.pages):
+    # Use append (not add_page) so the document-level AcroForm dict —
+    # including /NeedAppearances and all field definitions — is preserved.
+    writer.append(orig_reader)
+    for i in range(len(writer.pages)):
         if i < len(overlay_reader.pages):
-            # Overlay (signature + date) must be ON TOP of the original ESF.
-            orig_page.merge_page(overlay_reader.pages[i])
-            writer.add_page(orig_page)
-        else:
-            writer.add_page(orig_page)
+            # Merge signature/date content stream ON TOP of the original page.
+            # merge_page modifies the content stream but leaves widget
+            # annotations (AcroForm fields) untouched.
+            writer.pages[i].merge_page(overlay_reader.pages[i])
+
+    # Keep /NeedAppearances so Acrobat re-renders all field appearances.
+    try:
+        from pypdf.generic import BooleanObject, NameObject
+        acroform = writer._root_object.get("/AcroForm")
+        if acroform is not None:
+            if hasattr(acroform, "get_object"):
+                acroform = acroform.get_object()
+            acroform[NameObject("/NeedAppearances")] = BooleanObject(True)
+    except Exception:
+        pass
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "wb") as fh:
