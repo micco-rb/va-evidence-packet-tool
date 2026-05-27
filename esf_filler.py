@@ -256,7 +256,13 @@ def _build_header_overlay(
             c.setFillColor(black)
             c.setFont(_FB, _FHDR)
             left = 36          # 0.5 inch left margin
-            c.drawString(left, ph - 14,              vet_name)
+            # Format: "Last, First" (legal-document style)
+            parts = vet_name.strip().split()
+            if len(parts) >= 2:
+                display_name = f"{parts[-1]}, {' '.join(parts[:-1])}"
+            else:
+                display_name = vet_name
+            c.drawString(left, ph - 14,              display_name)
             c.drawString(left, ph - 14 - (_FHDR + 2), va_file_number)
 
         c.showPage()
