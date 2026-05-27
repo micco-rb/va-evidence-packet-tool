@@ -51,9 +51,9 @@ _UA = (
 
 _CONTEXT_OPTS = dict(
     user_agent  = _UA,
-    viewport    = {"width": 1920, "height": 1080},
+    viewport    = {"width": 1365, "height": 900},
     locale      = "en-US",
-    timezone_id = "America/New_York",
+    timezone_id = "America/Chicago",
     # Headers sent with every navigation request
     extra_http_headers = {
         "Accept":                    (
@@ -98,10 +98,15 @@ _INIT_SCRIPT = """
 
 # ── PDF print options ──────────────────────────────────────────────────────────
 _PDF_OPTS = dict(
-    format           = "Letter",
-    print_background = True,
-    margin           = dict(top="0.5in", bottom="0.5in",
-                            left="0.65in", right="0.65in"),
+    format               = "Letter",
+    print_background     = True,
+    prefer_css_page_size = True,
+    margin               = dict(
+        top    = "0.9in",
+        left   = "0.4in",
+        right  = "0.42in",
+        bottom = "0.39in",
+    ),
 )
 
 # ── Interstitial / browser-check phrases ──────────────────────────────────────
@@ -140,10 +145,10 @@ _INTERSTITIAL_CLEAR_JS = """
 """
 
 
-def _wait_for_article(page, timeout_ms: int = 12_000) -> None:
+def _wait_for_article(page, timeout_ms: int = 12_000) -> bool:
     """
     Poll article-content selectors until one becomes visible.
-    Logs the first match; logs a warning if none appear within the timeout.
+    Returns True if a selector matched, False if none appeared within the timeout.
     """
     per_sel_ms = max(1_500, timeout_ms // len(_ARTICLE_SELECTORS))
     for sel in _ARTICLE_SELECTORS:
@@ -151,10 +156,11 @@ def _wait_for_article(page, timeout_ms: int = 12_000) -> None:
             page.wait_for_selector(sel, state="visible", timeout=per_sel_ms)
             print(f"  [pw] article content visible: {sel!r}  url={page.url!r}",
                   flush=True)
-            return
+            return True
         except Exception:
             continue
-    print(f"  [pw] no article selector matched — proceeding", flush=True)
+    print(f"  [pw] no article selector matched  url={page.url!r}", flush=True)
+    return False
 
 
 def _wait_past_interstitial(page, interstitial_timeout_ms: int = 45_000) -> None:
@@ -268,14 +274,39 @@ def _render_pdf(url: str, timeout: int = 60_000) -> bytes:
                       flush=True)
 
             # ── Step 2: interstitial / redirect guard ──────────────────────
-            # If PubMed (or Cloudflare) is showing a browser-check page,
-            # wait until the real article content appears before printing.
             _wait_past_interstitial(page)
 
-            # ── Step 3: final content-settle pause ─────────────────────────
-            page.wait_for_timeout(2_000)
+            # ── Step 3: hard article validation (attempt 1) ────────────────
+            print(f"  [pw] validating article content (attempt 1) …", flush=True)
+            article_ok = _wait_for_article(page, timeout_ms=12_000)
 
-            # ── Step 4: print to PDF ───────────────────────────────────────
+            # ── Step 4: retry if article not found ─────────────────────────
+            if not article_ok:
+                print(f"  [pw] article not found — retrying full navigation …",
+                      flush=True)
+                try:
+                    page.wait_for_timeout(1_500)
+                    nav2 = page.goto(url, wait_until="domcontentloaded",
+                                     timeout=timeout)
+                    print(f"  [pw] retry http={nav2.status if nav2 else '?'}",
+                          flush=True)
+                    _wait_past_interstitial(page)
+                    article_ok = _wait_for_article(page, timeout_ms=15_000)
+                except Exception as exc:
+                    print(f"  [pw] retry navigation failed: {exc}", flush=True)
+
+            # ── Step 5: refuse to print interstitial page ──────────────────
+            if not article_ok:
+                raise ValueError(
+                    f"Article content not found after retry for {url!r} — "
+                    "interstitial not cleared. PMID will be skipped."
+                )
+
+            # ── Step 6: mandatory 3 s settle before printing ───────────────
+            print(f"  [pw] article validated — settling 3 s …", flush=True)
+            page.wait_for_timeout(3_000)
+
+            # ── Step 7: print to PDF ───────────────────────────────────────
             print(f"  [pw] calling page.pdf() …", flush=True)
             pdf = page.pdf(**_PDF_OPTS)
             valid = pdf[:4] == b"%PDF" if pdf else False
