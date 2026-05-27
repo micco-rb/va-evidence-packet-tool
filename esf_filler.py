@@ -873,25 +873,26 @@ def _build_sig_overlay(
         c.setPageSize((pw, ph))
         if i == page_idx:
 
-            # ── Compute centered signature Y ──────────────────────
+            # ── Compute signature Y ───────────────────────────────
             # sig_top/sig_bot are the pdfplumber bounds of the LABEL word
             # (e.g. "19A. POA/AUTHORIZED REPRESENTATIVE SIGNATURE").
-            # The blank field area sits BELOW the label, so we offset
-            # downward (subtract in ReportLab's bottom-origin coordinates)
-            # to land inside the blank signing line rather than on the label.
-            s_top = anchors.get("sig_top", 0)
-            s_bot = anchors.get("sig_bot", s_top + 20)
-            field_mid_rl = ph - (s_top + s_bot) / 2        # rl y of label centre
-            sig_y = field_mid_rl - SIG_H / 2 - 14          # shift down 14 pt below label
+            # pdfplumber only captures the text glyph height (~7 pt), so
+            # centering on the label row always places the image ON the label.
+            # Fix: anchor to the label's BOTTOM edge and place the image
+            # immediately below it (into the blank signing area).
+            s_top     = anchors.get("sig_top", 0)
+            s_bot     = anchors.get("sig_bot", s_top + 20)
+            s_bot_rl  = ph - s_bot              # RL y of label bottom edge
+            # Image bottom-left: 2 pt gap below label, then the image fills downward.
+            sig_y     = s_bot_rl - SIG_H - 2
 
             # ── Compute centered date Y ────────────────────────────
-            # Place the text baseline centred in the 19B guide boxes.
-            # The +4 pt upward nudge (−4 in RL) keeps digits from riding too
-            # high inside the printed boxes.
-            d_top = anchors.get("date_top", s_top)
-            d_h   = anchors.get("date_h", 12.0)
+            # d_top/d_h from pdfplumber; centre text baseline in the box.
+            # Subtract 6 pt so digits sit in the lower half of the guide boxes.
+            d_top     = anchors.get("date_top", s_top)
+            d_h       = anchors.get("date_h", 12.0)
             d_mid_rl  = ph - (d_top + d_h / 2)
-            date_y    = d_mid_rl - DATE_FONT_SIZE * 0.35 - 4   # shift down 4 pt
+            date_y    = d_mid_rl - DATE_FONT_SIZE * 0.35 - 6
 
             # ── Debug: red/blue bounds ────────────────────────────
             if _DEBUG_OVERLAY:
