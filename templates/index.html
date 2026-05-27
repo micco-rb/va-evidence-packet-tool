@@ -199,20 +199,20 @@
         </div>
       </div>
 
-      <!-- VA File Number -->
+      <!-- Social Security Number -->
       <div class="glass rounded-xl px-5 py-4 mb-6">
         <label class="block text-slate-300 text-sm font-semibold mb-2 flex items-center gap-2">
           <span class="w-5 h-5 rounded-full bg-indigo-600 text-white text-xs flex items-center justify-center font-bold">3</span>
-          VA File Number
+          Social Security Number (SSN)
           <span class="text-slate-600 font-normal text-xs">(used for packet headers)</span>
         </label>
-        <input id="inp-va-num" type="text" maxlength="12"
-          placeholder="e.g. 321469459"
+        <input id="inp-va-num" type="text" maxlength="11"
+          placeholder="e.g. 123-45-6789 or 123456789"
           class="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-white text-sm
                  placeholder-slate-600 focus:outline-none focus:border-indigo-500 focus:bg-white/8
                  tracking-wider font-mono"
           oninput="chkReady()" />
-        <p class="text-slate-600 text-xs mt-1.5">Digits only — spaces and dashes are stripped automatically.</p>
+        <p class="text-slate-600 text-xs mt-1.5">Accept XXX-XX-XXXX or digits only — dashes stripped automatically.</p>
       </div>
 
       <!-- Pipeline steps -->
@@ -591,7 +591,7 @@
       // Prefer the manually-entered VA number; fall back to auto-extracted
       const manualVa = (document.getElementById('inp-va-num')?.value || '').replace(/[^0-9]/g, '');
       const displayVa = manualVa || d.va_file_number || '';
-      document.getElementById('conf-va-num').textContent = displayVa ? `VA File # ${displayVa}` : '';
+      document.getElementById('conf-va-num').textContent = displayVa ? `SSN ${displayVa}` : '';
       document.getElementById('conf-url-count').textContent= d.url_count ?? 0;
       document.getElementById('conf-esf-name').textContent = esfFile ? esfFile.name : '(none)';
 
@@ -735,7 +735,7 @@
     // ── Results ────────────────────────────────────────────────────
     function renderResults(d) {
       document.getElementById('res-vet').textContent    = d.vet_name || 'Unknown Veteran';
-      document.getElementById('res-va-num').textContent = d.va_file_number ? `VA File # ${d.va_file_number}` : '';
+      document.getElementById('res-va-num').textContent = d.va_file_number ? `SSN ${d.va_file_number}` : '';
       document.getElementById('stat-cond').textContent  = (d.illnesses || []).length;
       document.getElementById('stat-dl').textContent    = d.dl_summary?.downloaded ?? '–';
       document.getElementById('stat-skip').textContent  = d.dl_summary?.skipped    ?? '–';
