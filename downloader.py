@@ -24,16 +24,24 @@ import requests as _http
 # ── Worker URL ────────────────────────────────────────────────────────────────
 
 def _worker_url() -> str:
-    url = os.environ.get("RENDERER_URL", "").rstrip("/")
-    if not url:
+    raw = os.environ.get("RENDERER_URL", "").strip().rstrip("/")
+    print(f"[downloader] RENDERER_URL raw = {raw!r}", flush=True)
+
+    if not raw:
         raise RuntimeError(
             "\n\n  *** RENDERER_URL is not set ***\n"
-            "  Start the local renderer worker and add the secret:\n"
+            "  Add a Replit Secret with:\n"
             "    Key:   RENDERER_URL\n"
-            "    Value: http://<your-LAN-ip>:7777\n"
-            "  See renderer_worker/README.md for setup instructions.\n"
+            "    Value: https://va-evidence-packet-tool-production-0817.up.railway.app\n"
         )
-    return url
+
+    # Auto-add https:// if the value was saved without a scheme
+    if not raw.startswith(("http://", "https://")):
+        raw = "https://" + raw
+        print(f"[downloader] scheme missing — normalized to: {raw!r}", flush=True)
+
+    print(f"[downloader] Using renderer at: {raw}", flush=True)
+    return raw
 
 
 def _check_worker(base: str) -> None:
