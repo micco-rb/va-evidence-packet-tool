@@ -200,49 +200,63 @@ def _pipeline(job_id: str, confirmed: list[str]):
         _log(job_id, msg)
 
     try:
-        j              = _job(job_id)
-        vet_name       = j["vet_name"]
-        va_file_number = j.get("va_file_number", "")
-        text           = j["text"]
-        esf_path       = j.get("esf_path")
-        urls           = j["urls"]
+        j                    = _job(job_id)
+        vet_name             = j["vet_name"]
+        va_file_number       = j.get("va_file_number", "")
+        esf_path             = j.get("esf_path")
+        conditions_with_urls = j.get("conditions_with_urls", [])
 
-        log(f"Veteran  : {vet_name}")
-        log(f"VA File# : {va_file_number or '(not found)'}")
+        log(f"Veteran   : {vet_name}")
+        log(f"VA File#  : {va_file_number or '(not found)'}")
         log(f"Conditions: {', '.join(confirmed)}")
-        log(f"PubMed articles: {len(urls)}")
 
-        # ── Stage 1: download all research PDFs ───────────────────────
+        # ── Stage 1: download user-provided research PDFs ─────────────────────
         _update(job_id, stage="downloading")
 
-        # Each job gets its own isolated download directory under output/<job_id>/.
-        # This prevents any cross-run or cross-condition contamination — a previous
-        # run's leftover PDFs can never bleed into the current run.
         job_dl_dir = OUTPUT_DIR / job_id / "research"
         job_dl_dir.mkdir(parents=True, exist_ok=True)
 
-        # Pre-create one subfolder per condition (slug-safe names).
         cond_folders: dict[str, Path] = {}
         for cond in confirmed:
             slug_dir = job_dl_dir / _cond_slug(cond)
             slug_dir.mkdir(exist_ok=True)
             cond_folders[cond] = slug_dir
 
-        # Assign each URL to exactly one condition using section-based parsing
-        # then pattern-proximity matching (see _build_url_condition_map).
-        url_to_cond = _build_url_condition_map(text, urls, confirmed)
+        # Build URL → condition maps from user-supplied URLs only
+        url_to_cond:  dict[str, str]       = {}
+        url_to_conds: dict[str, set[str]]  = {}
 
-        seen_urls: set[str] = set()
+        cond_url_map: dict[str, list[str]] = {
+            entry["condition"]: entry.get("urls", [])
+            for entry in conditions_with_urls
+        }
+
+        for cond in confirmed:
+            user_urls = cond_url_map.get(cond, [])
+            log(f"\n[urls] {cond}: {len(user_urls)} URL(s)")
+            for raw in user_urls:
+                u = raw.strip()
+                if not u:
+                    continue
+                if u not in url_to_cond:
+                    url_to_cond[u] = cond
+                url_to_conds.setdefault(u, set()).add(cond)
+                log(f"  {u}")
+
+        # Build url_map — one entry per unique URL, may target multiple folders
+        all_urls_ordered: list[str] = list(url_to_conds.keys())
         url_map: list[tuple[str, list[str]]] = []
-        for url in urls:
-            if url in seen_urls:
-                continue          # skip exact duplicates — one download per URL
-            seen_urls.add(url)
-            cond = url_to_cond.get(url, confirmed[0])
-            url_map.append((url, [str(cond_folders[cond])]))
-            log(f"  {url} → {cond}")
+        for url in all_urls_ordered:
+            target_folders = [
+                str(cond_folders[c])
+                for c in url_to_conds[url]
+                if c in cond_folders
+            ]
+            url_map.append((url, target_folders))
 
+        _update(job_id, total_search_urls=len(all_urls_ordered))
         log(f"\nDownloading {len(url_map)} article(s)…")
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -252,24 +266,36 @@ def _pipeline(job_id: str, confirmed: list[str]):
 
         log(f"Downloaded: {dl_results['downloaded']}  |  Skipped: {dl_results['skipped']}")
 
-        # ── Build per-condition successful_pdfs from exact saved paths ────────
-        # Uses the saved_paths returned by the downloader for each URL so that
-        # the merge stage never relies on a folder scan or re-derivation.
+        # ── Build per-condition successful_pdfs from saved_paths ──────────────
+        # Determine which condition each saved file belongs to by its folder path.
         successful_pdfs: dict[str, list[str]] = {cond: [] for cond in confirmed}
+
+        def _path_to_cond(p: str) -> str | None:
+            pp = Path(p).resolve()
+            for c, folder in cond_folders.items():
+                try:
+                    pp.relative_to(folder.resolve())
+                    return c
+                except ValueError:
+                    continue
+            return None
 
         for entry in dl_results["results"]:
             if entry.get("downloaded") and entry.get("saved_paths"):
-                cond = url_to_cond.get(entry["url"], confirmed[0])
                 for p in entry["saved_paths"]:
                     if Path(p).exists():
-                        successful_pdfs[cond].append(p)
-                        print(f"[render-success] {p}", flush=True)
+                        cond_for_path = _path_to_cond(p)
+                        if cond_for_path:
+                            successful_pdfs[cond_for_path].append(p)
+                            print(f"[render-success] {p}", flush=True)
+                        else:
+                            print(f"[render-success] unmatched path: {p}", flush=True)
                     else:
                         print(f"[render-fail] downloaded=True but file missing: {p}",
                               flush=True)
             else:
-                print(f"[render-fail] preserving prior successes — "
-                      f"url={entry['url']!r} downloaded={entry.get('downloaded')}",
+                print(f"[render-fail] url={entry['url']!r} "
+                      f"downloaded={entry.get('downloaded')}",
                       flush=True)
 
         # Keep illness_files for UI/status reporting only (not used for merge)
@@ -286,30 +312,32 @@ def _pipeline(job_id: str, confirmed: list[str]):
                 "downloaded": entry["downloaded"],
                 "pmid":       pmid,
                 "filename":   f"PMID_{pmid}.pdf" if pmid else "article.pdf",
+                # enriched fields for retry/upload workflow
+                "status":      "ok" if entry.get("downloaded") else "failed",
+                "conditions":  list(url_to_conds.get(entry["url"], set())),
+                "saved_paths": entry.get("saved_paths", []),
+                "error":       "" if entry.get("downloaded") else "Render failed",
             })
 
         # ── Stage 2 & 3: per-condition ESF fill + merge + headers ─────
-        condition_packets: dict[str, str] = {}
+        condition_packets:  dict[str, str] = {}
+        filled_esf_paths:   dict[str, str] = {}   # kept so rebuild skips re-fill
 
         if esf_path and Path(esf_path).exists():
             for cond in confirmed:
                 slug        = _cond_slug(cond)
-                # Merge uses ONLY the directly-tracked successful PDF list —
-                # never recalculated, never overwritten by a later failure.
-                cond_pdfs = successful_pdfs.get(cond, [])
+                cond_pdfs   = successful_pdfs.get(cond, [])
 
                 print(f"[merge] condition={cond!r}", flush=True)
                 print(f"[merge] successful_pdfs={cond_pdfs}", flush=True)
 
-                # Only include articles that were downloaded FOR this condition
                 cond_entries = [
                     a for a in article_results
-                    if a["downloaded"] and url_to_cond.get(a["url"]) == cond
+                    if a["downloaded"] and cond in url_to_conds.get(a["url"], set())
                 ]
 
                 # Fill ESF
-                _update(job_id, stage="filling_esf",
-                        current_condition=cond)
+                _update(job_id, stage="filling_esf", current_condition=cond)
                 log(f"\n[{cond}] Filling ESF…")
                 filled_esf = str(OUTPUT_DIR / f"{job_id}_{slug}_ESF.pdf")
                 esf_filler.fill_esf_for_condition(
@@ -325,6 +353,7 @@ def _pipeline(job_id: str, confirmed: list[str]):
                     esf_path    = filled_esf,
                     output_path = filled_esf,
                 )
+                filled_esf_paths[cond] = filled_esf
 
                 # Merge + add headers
                 _update(job_id, stage="merging")
@@ -352,6 +381,7 @@ def _pipeline(job_id: str, confirmed: list[str]):
             dl_summary         = dl_results,
             article_results    = article_results,
             illness_files      = illness_files,
+            filled_esf_paths   = filled_esf_paths,
             condition_packets  = condition_packets,
             current_condition  = "",
         )
@@ -407,6 +437,47 @@ def delete_signature():
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+# ── Phase 0: create blank job (no memo) ──────────────────────────────────
+
+@app.route("/new-job", methods=["POST"])
+def new_job():
+    """Create an empty job when no memorandum is uploaded."""
+    job_id = str(uuid.uuid4())[:8]
+    with _lock:
+        jobs[job_id] = {
+            "id":               job_id,
+            "filename":         None,
+            "file_path":        None,
+            "esf_path":         None,
+            "esf_filename":     None,
+            "text":             "",
+            "status":           "parsed",
+            "stage":            "confirm",
+            "vet_name":         "",
+            "va_file_number":   "",
+            "illnesses_clean":  [],
+            "illnesses":        [],
+            "extraction_debug": ["No memo uploaded — conditions entered manually."],
+            "urls":             [],
+            "logs":             [],
+            "article_results":  [],
+            "illness_files":    {},
+            "dl_summary":       {},
+            "condition_packets":{},
+            "current_condition": "",
+            "error":            None,
+            "created":          time.time(),
+        }
+    return jsonify(
+        job_id          = job_id,
+        vet_name        = "",
+        va_file_number  = "",
+        illnesses_clean = [],
+        extraction_debug= ["No memo uploaded — conditions entered manually."],
+        url_count       = 0,
+    )
 
 
 # ── Phase 1: upload + parse memo ─────────────────────────────────────────
@@ -517,11 +588,20 @@ def process(job_id: str):
     if j.get("status") not in ("parsed", "error"):
         return jsonify(error="Job already processing or done"), 400
 
-    body      = request.get_json(silent=True) or {}
-    confirmed = body.get("confirmed_illnesses", j.get("illnesses_clean", []))
+    body = request.get_json(silent=True) or {}
+
+    # New primary format: [{condition, urls}, …]
+    conditions_with_urls: list[dict] = body.get("conditions_with_urls", [])
+    if conditions_with_urls:
+        confirmed = [
+            c["condition"] for c in conditions_with_urls if c.get("condition", "").strip()
+        ]
+    else:
+        # Fallback for legacy callers
+        confirmed = body.get("confirmed_illnesses", j.get("illnesses_clean", []))
 
     if not confirmed:
-        return jsonify(error="No conditions selected"), 400
+        return jsonify(error="No conditions provided"), 400
 
     # Manual VA file number overrides any auto-extracted value
     manual_va = body.get("va_file_number", "")
@@ -529,12 +609,168 @@ def process(job_id: str):
         manual_va = re.sub(r"[^0-9]", "", str(manual_va))
     final_va = manual_va or j.get("va_file_number") or ""
 
-    _update(job_id, status="processing", stage="downloading",
-            illnesses=confirmed, logs=[], condition_packets={},
-            va_file_number=final_va)
+    _update(job_id,
+            status              = "processing",
+            stage               = "downloading",
+            illnesses           = confirmed,
+            conditions_with_urls= conditions_with_urls,
+            logs                = [],
+            condition_packets   = {},
+            va_file_number      = final_va)
 
     threading.Thread(target=_pipeline, args=(job_id, confirmed), daemon=True).start()
     return jsonify(ok=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Partial-rebuild helper  (retry / manual upload)
+# ─────────────────────────────────────────────────────────────────────────
+
+def _rebuild_packet(job_id: str, cond: str) -> str:
+    """
+    Re-merge ONE condition packet from the already-signed ESF + current
+    illness_files list.  Does NOT re-run ESF fill or signature stamping —
+    those are expensive and correct.  Only the merge step is repeated.
+    Returns the path of the rebuilt packet.
+    """
+    j           = _job(job_id)
+    slug        = _cond_slug(cond)
+    vet_name    = j.get("vet_name", "")
+    va_file_num = j.get("va_file_number", "")
+
+    filled_esf = j.get("filled_esf_paths", {}).get(cond)
+    if not filled_esf or not Path(filled_esf).exists():
+        raise FileNotFoundError(
+            f"Signed ESF not found for condition {cond!r} — "
+            "cannot rebuild without re-running the full pipeline."
+        )
+
+    cond_pdfs   = j.get("illness_files", {}).get(cond, [])
+    packet_path = str(OUTPUT_DIR / f"{job_id}_Final_{slug}_Packet.pdf")
+
+    print(f"[rebuild] {cond!r}  esf={filled_esf}  pdfs={len(cond_pdfs)}",
+          flush=True)
+
+    esf_filler.build_condition_packet(
+        filled_esf_path    = filled_esf,
+        research_pdf_paths = cond_pdfs,
+        output_path        = packet_path,
+        vet_name           = vet_name,
+        va_file_number     = va_file_num,
+        condition          = cond,
+    )
+
+    with _lock:
+        if job_id in jobs:
+            jobs[job_id].setdefault("condition_packets", {})[cond] = packet_path
+
+    print(f"[rebuild] done → {Path(packet_path).name}", flush=True)
+    return packet_path
+
+
+# ── Retry a single failed article ─────────────────────────────────────────
+
+@app.route("/retry-article/<job_id>", methods=["POST"])
+def retry_article(job_id: str):
+    j = _job(job_id)
+    if not j:
+        return jsonify(error="Job not found"), 404
+
+    data = request.get_json(silent=True) or {}
+    cond = data.get("condition", "").strip()
+    url  = data.get("url", "").strip()
+    if not cond or not url:
+        return jsonify(error="condition and url required"), 400
+
+    cond_folder = OUTPUT_DIR / job_id / "research" / _cond_slug(cond)
+    cond_folder.mkdir(parents=True, exist_ok=True)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        dl = loop.run_until_complete(
+            downloader.run_downloads([(url, [str(cond_folder)])])
+        )
+    finally:
+        loop.close()
+
+    entry = dl["results"][0] if dl.get("results") else {}
+    ok    = entry.get("downloaded", False)
+
+    if ok:
+        # Merge new PDFs into illness_files
+        with _lock:
+            if job_id in jobs:
+                ifiles = jobs[job_id].setdefault("illness_files", {})
+                ifiles.setdefault(cond, [])
+                for p in entry.get("saved_paths", []):
+                    if Path(p).exists() and p not in ifiles[cond]:
+                        ifiles[cond].append(p)
+                # Update article status
+                for a in jobs[job_id].get("article_results", []):
+                    if a["url"] == url:
+                        a["status"]      = "ok"
+                        a["downloaded"]  = True
+                        a["saved_paths"] = entry.get("saved_paths", [])
+                        a["error"]       = ""
+        try:
+            _rebuild_packet(job_id, cond)
+            return jsonify(ok=True, status="ok",
+                           packet_url=f"/final/{job_id}/{cond}")
+        except Exception as exc:
+            return jsonify(ok=False, error=str(exc)), 500
+    else:
+        return jsonify(ok=False, status="failed",
+                       error="Render failed — PMC may be blocking this IP")
+
+
+# ── Accept a manually-uploaded replacement PDF ────────────────────────────
+
+@app.route("/upload-article-pdf/<job_id>", methods=["POST"])
+def upload_article_pdf(job_id: str):
+    j = _job(job_id)
+    if not j:
+        return jsonify(error="Job not found"), 404
+
+    cond = request.form.get("condition", "").strip()
+    url  = request.form.get("url", "").strip()
+    f    = request.files.get("file")
+    if not cond or not f:
+        return jsonify(error="condition and file are required"), 400
+
+    # Save uploaded PDF to the condition research folder
+    cond_folder = OUTPUT_DIR / job_id / "research" / _cond_slug(cond)
+    cond_folder.mkdir(parents=True, exist_ok=True)
+
+    existing   = list(cond_folder.glob("*.pdf"))
+    next_idx   = len(existing) + 1
+    safe_name  = re.sub(r"[^\w.-]", "_", f.filename or "manual.pdf")
+    save_path  = str(cond_folder / f"{next_idx:02d}_manual_{safe_name}")
+    f.save(save_path)
+
+    # Update job state
+    with _lock:
+        if job_id in jobs:
+            ifiles = jobs[job_id].setdefault("illness_files", {})
+            ifiles.setdefault(cond, [])
+            if save_path not in ifiles[cond]:
+                ifiles[cond].append(save_path)
+            # Mark article row as manually uploaded
+            if url:
+                for a in jobs[job_id].get("article_results", []):
+                    if a["url"] == url:
+                        a["status"]     = "manual"
+                        a["downloaded"] = True
+                        a["error"]      = ""
+
+    try:
+        _rebuild_packet(job_id, cond)
+        # Return updated illness_files count for UI
+        updated_count = len(_job(job_id).get("illness_files", {}).get(cond, []))
+        return jsonify(ok=True, packet_url=f"/final/{job_id}/{cond}",
+                       pdf_count=updated_count)
+    except Exception as exc:
+        return jsonify(ok=False, error=str(exc)), 500
 
 
 # ── Status polling ────────────────────────────────────────────────────────

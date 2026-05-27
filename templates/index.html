@@ -62,11 +62,33 @@
     .section.visible { display:block; }
 
     .article-row {
-      display:flex; align-items:center; justify-content:space-between;
+      display:flex; align-items:flex-start; justify-content:space-between;
       padding:10px 16px; border-radius:8px;
       background:rgba(255,255,255,.03); border:1px solid rgba(255,255,255,.06);
-      margin-bottom:8px;
+      margin-bottom:8px; gap:10px;
     }
+    .article-row.failed-row { border-color: rgba(239,68,68,.25); background:rgba(239,68,68,.04); }
+
+    .pill-red  { background:rgba(239,68,68,.13); border:1px solid rgba(239,68,68,.3); color:#fca5a5; }
+    .pill-teal { background:rgba(20,184,166,.12); border:1px solid rgba(20,184,166,.3); color:#5eead4; }
+
+    .btn-retry {
+      display:inline-flex; align-items:center; gap:5px;
+      padding:4px 11px; border-radius:6px; font-size:11px; font-weight:500; cursor:pointer;
+      background:rgba(99,102,241,.15); border:1px solid rgba(99,102,241,.35); color:#a5b4fc;
+      transition:all .15s;
+    }
+    .btn-retry:hover  { background:rgba(99,102,241,.28); }
+    .btn-retry:disabled { opacity:.45; cursor:not-allowed; }
+
+    .btn-upload-art {
+      display:inline-flex; align-items:center; gap:5px;
+      padding:4px 11px; border-radius:6px; font-size:11px; font-weight:500; cursor:pointer;
+      background:rgba(245,158,11,.12); border:1px solid rgba(245,158,11,.3); color:#fcd34d;
+      transition:all .15s;
+    }
+    .btn-upload-art:hover  { background:rgba(245,158,11,.24); }
+    .btn-upload-art:disabled { opacity:.45; cursor:not-allowed; }
 
     /* Per-condition packet card */
     .packet-card {
@@ -82,16 +104,51 @@
       font-size: 12px; color: #6ee7b7;
     }
 
-    .condition-card {
-      display:flex; align-items:center;
-      background:rgba(255,255,255,.03); border:1px solid rgba(255,255,255,.08);
-      border-radius:10px; padding:12px 16px;
-      cursor:pointer; transition:all .15s; user-select:none;
+    .cond-card {
+      background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.1);
+      border-radius:14px; padding:18px 20px; margin-bottom:14px; transition:border-color .2s;
     }
-    .condition-card:hover  { background:rgba(99,102,241,.08); border-color:rgba(99,102,241,.3); }
-    .condition-card.selected  { background:rgba(99,102,241,.12); border-color:rgba(99,102,241,.45); }
-    .condition-card.deselected { opacity:.4; }
-    .condition-card input[type=checkbox] { accent-color:#6366f1; width:16px; height:16px; cursor:pointer; flex-shrink:0; }
+    .cond-card:focus-within { border-color:rgba(99,102,241,.35); }
+    .cond-name-input {
+      flex:1; background:rgba(0,0,0,.3); border:1px solid rgba(255,255,255,.12);
+      border-radius:8px; padding:9px 13px; color:#fff; font-size:14px; font-weight:500;
+      transition:border-color .15s; min-width:0;
+    }
+    .cond-name-input:focus { outline:none; border-color:rgba(99,102,241,.65); }
+    .cond-name-input::placeholder { color:#374151; font-weight:400; }
+    .url-row { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+    .url-input {
+      flex:1; background:rgba(0,0,0,.25); border:1px solid rgba(255,255,255,.07);
+      border-radius:7px; padding:7px 11px; color:#94a3b8; font-size:12px;
+      font-family:'Courier New',monospace; transition:border-color .15s; min-width:0;
+    }
+    .url-input:focus { outline:none; border-color:rgba(99,102,241,.45); color:#e2e8f0; }
+    .url-input::placeholder { color:#1e293b; }
+    .btn-rm-url {
+      width:28px; height:28px; flex-shrink:0; display:flex; align-items:center; justify-content:center;
+      background:rgba(239,68,68,.1); border:1px solid rgba(239,68,68,.2);
+      border-radius:6px; color:#f87171; cursor:pointer; transition:all .15s;
+    }
+    .btn-rm-url:hover { background:rgba(239,68,68,.25); }
+    .btn-add-url {
+      width:100%; background:rgba(99,102,241,.08); border:1px dashed rgba(99,102,241,.3);
+      border-radius:7px; padding:7px 12px; color:#818cf8; font-size:12px;
+      cursor:pointer; transition:all .15s; text-align:left; margin-top:2px;
+    }
+    .btn-add-url:hover { background:rgba(99,102,241,.18); border-color:rgba(99,102,241,.6); }
+    .btn-rm-cond {
+      background:rgba(239,68,68,.08); border:1px solid rgba(239,68,68,.2);
+      border-radius:7px; padding:5px 11px; color:#f87171; font-size:11px;
+      cursor:pointer; transition:all .15s; flex-shrink:0; white-space:nowrap;
+    }
+    .btn-rm-cond:hover { background:rgba(239,68,68,.22); }
+    .btn-add-cond {
+      display:flex; align-items:center; gap:8px; width:100%;
+      background:rgba(255,255,255,.03); border:2px dashed rgba(255,255,255,.12);
+      border-radius:12px; padding:14px 18px; color:#64748b; font-size:14px;
+      cursor:pointer; transition:all .2s; margin-top:4px;
+    }
+    .btn-add-cond:hover { background:rgba(99,102,241,.08); border-color:rgba(99,102,241,.4); color:#818cf8; }
 
     .btn-primary {
       background:linear-gradient(135deg,#6366f1,#8b5cf6); color:white;
@@ -163,30 +220,16 @@
     <section id="section-upload" class="section visible">
       <div class="text-center mb-10">
         <h2 class="text-3xl font-bold text-white mb-3">Build Evidence Packets</h2>
-        <p class="text-slate-400 text-base max-w-2xl mx-auto">Upload the veteran memorandum and the ESF. One separate evidence packet is generated per claimed condition.</p>
+        <p class="text-slate-400 text-base max-w-2xl mx-auto">Upload the ESF and optionally a memo for auto-fill. You will manually enter conditions and paste research URLs before building.</p>
       </div>
 
       <div class="grid grid-cols-1 md:grid-cols-2 gap-5 mb-8">
-        <!-- Memorandum -->
+        <!-- ESF — required -->
         <div>
           <p class="text-slate-300 text-sm font-semibold mb-2 flex items-center gap-2">
             <span class="w-5 h-5 rounded-full bg-indigo-600 text-white text-xs flex items-center justify-center font-bold">1</span>
-            Veteran Memorandum
-          </p>
-          <div id="dz-memo" class="drop-zone p-7 text-center" onclick="document.getElementById('inp-memo').click()">
-            <div class="w-12 h-12 mx-auto mb-3 rounded-xl bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center">
-              <svg class="w-6 h-6 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-            </div>
-            <p class="text-white font-medium text-sm mb-0.5" id="memo-label">Drop .docx or .pdf</p>
-            <p class="text-slate-500 text-xs" id="memo-sub">Conditions extracted from this file only</p>
-            <input type="file" id="inp-memo" accept=".docx,.pdf" style="display:none" />
-          </div>
-        </div>
-        <!-- ESF -->
-        <div>
-          <p class="text-slate-300 text-sm font-semibold mb-2 flex items-center gap-2">
-            <span class="w-5 h-5 rounded-full bg-indigo-600 text-white text-xs flex items-center justify-center font-bold">2</span>
             Evidence Summary Form (ESF)
+            <span class="text-red-400 text-xs font-normal">required</span>
           </p>
           <div id="dz-esf" class="drop-zone p-7 text-center" onclick="document.getElementById('inp-esf').click()">
             <div class="w-12 h-12 mx-auto mb-3 rounded-xl bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center">
@@ -195,6 +238,22 @@
             <p class="text-white font-medium text-sm mb-0.5" id="esf-label">Drop .pdf ESF here</p>
             <p class="text-slate-500 text-xs" id="esf-sub">One filled copy created per condition</p>
             <input type="file" id="inp-esf" accept=".pdf" style="display:none" />
+          </div>
+        </div>
+        <!-- Memorandum — optional -->
+        <div>
+          <p class="text-slate-300 text-sm font-semibold mb-2 flex items-center gap-2">
+            <span class="w-5 h-5 rounded-full bg-slate-700 text-white text-xs flex items-center justify-center font-bold">2</span>
+            Veteran Memorandum
+            <span class="text-slate-500 text-xs font-normal">(optional — auto-fills info)</span>
+          </p>
+          <div id="dz-memo" class="drop-zone p-7 text-center" onclick="document.getElementById('inp-memo').click()">
+            <div class="w-12 h-12 mx-auto mb-3 rounded-xl bg-slate-700/40 border border-slate-600/30 flex items-center justify-center">
+              <svg class="w-6 h-6 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+            </div>
+            <p class="text-white font-medium text-sm mb-0.5" id="memo-label">Drop .docx or .pdf</p>
+            <p class="text-slate-500 text-xs" id="memo-sub">Auto-fills vet name, SSN, and condition suggestions</p>
+            <input type="file" id="inp-memo" accept=".docx,.pdf" style="display:none" />
           </div>
         </div>
       </div>
@@ -217,9 +276,9 @@
 
       <!-- Pipeline steps -->
       <div class="glass rounded-xl px-5 py-4 mb-8 flex flex-wrap gap-x-4 gap-y-2 items-center justify-center text-xs text-slate-500">
-        <span class="flex items-center gap-1.5"><span class="text-indigo-400 font-semibold">①</span> Parse memo conditions</span>
+        <span class="flex items-center gap-1.5"><span class="text-indigo-400 font-semibold">①</span> Enter conditions + paste URLs</span>
         <svg class="w-3 h-3 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-        <span class="flex items-center gap-1.5"><span class="text-indigo-400 font-semibold">②</span> Download PubMed PDFs</span>
+        <span class="flex items-center gap-1.5"><span class="text-indigo-400 font-semibold">②</span> Download only those PDFs</span>
         <svg class="w-3 h-3 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
         <span class="flex items-center gap-1.5"><span class="text-indigo-400 font-semibold">③</span> Per-condition ESF fill + X mark</span>
         <svg class="w-3 h-3 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
@@ -235,8 +294,8 @@
       </div>
 
       <div class="text-center">
-        <button id="btn-run" class="btn-primary" disabled onclick="startParse()">Analyze &amp; Continue</button>
-        <p id="upload-hint" class="text-slate-600 text-xs mt-3">Upload both files to continue</p>
+        <button id="btn-run" class="btn-primary" disabled onclick="startParse()">Continue</button>
+        <p id="upload-hint" class="text-slate-600 text-xs mt-3">Upload the ESF to continue</p>
       </div>
       <div id="upload-error" class="hidden max-w-xl mx-auto mt-4 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm text-center"></div>
     </section>
@@ -256,80 +315,62 @@
          CONFIRM CONDITIONS
     ══════════════════════════════════════════════════════ -->
     <section id="section-confirm" class="section">
-      <div class="mb-8">
-        <div class="flex items-center gap-2 mb-1">
-          <div class="w-2 h-2 rounded-full bg-indigo-400"></div>
-          <span class="text-indigo-400 text-sm font-medium">Memorandum analyzed</span>
-        </div>
-        <h2 class="text-3xl font-bold text-white">Review Extracted Conditions</h2>
-        <p class="text-slate-400 text-sm mt-1">Veteran: <span id="conf-vet" class="text-white font-medium"></span>
-          <span id="conf-va-num" class="ml-3 text-slate-500 text-xs"></span>
+
+      <!-- Header -->
+      <div class="mb-7">
+        <h2 class="text-3xl font-bold text-white mb-1">Condition Builder</h2>
+        <p class="text-slate-400 text-sm">
+          Add each claimed condition and the research URLs to include in its packet.
+          <span id="conf-vet-row" class="hidden"> · Veteran: <span id="conf-vet" class="text-white font-medium"></span><span id="conf-va-num" class="ml-2 text-slate-500"></span></span>
         </p>
       </div>
 
-      <div class="glass rounded-2xl p-6 mb-5">
-        <div class="flex items-center justify-between mb-4">
-          <h3 class="text-white font-semibold flex items-center gap-2">
-            <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
-            Claimed Conditions
-          </h3>
-          <span class="text-slate-500 text-xs">One packet will be generated per condition</span>
+      <!-- ESF status bar -->
+      <div class="glass rounded-xl px-5 py-3 flex items-center gap-3 mb-6">
+        <div class="w-7 h-7 rounded-lg bg-green-600/20 flex items-center justify-center flex-shrink-0">
+          <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
         </div>
-
-        <div id="condition-cards" class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4"></div>
-
-        <div id="no-cond-warn" class="hidden px-4 py-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 text-sm mb-3">
-          No conditions detected. Add them manually below.
+        <div class="flex-1 min-w-0">
+          <span class="text-white text-sm font-medium">ESF ready</span>
+          <span id="conf-esf-name" class="text-slate-500 text-xs ml-3 truncate"></span>
         </div>
-
-        <div class="flex gap-2">
-          <input id="manual-cond" type="text" placeholder="Add condition manually…"
-            class="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500"
-            onkeydown="if(event.key==='Enter') addManual()" />
-          <button onclick="addManual()" class="px-4 py-2 rounded-lg bg-indigo-600/30 border border-indigo-500/40 text-indigo-300 text-sm font-medium hover:bg-indigo-600/50 transition-colors">Add</button>
-        </div>
+        <span class="text-slate-600 text-xs">One filled copy per condition</span>
       </div>
 
-      <!-- ESF + research info -->
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5">
-        <div class="glass rounded-xl px-5 py-4 flex items-center gap-3">
-          <div class="w-8 h-8 rounded-lg bg-green-600/20 flex items-center justify-center flex-shrink-0">
-            <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-          </div>
-          <div>
-            <p class="text-white text-sm font-medium">ESF ready</p>
-            <p id="conf-esf-name" class="text-slate-500 text-xs truncate max-w-[180px]"></p>
-          </div>
-        </div>
-        <div class="glass rounded-xl px-5 py-4 flex items-center gap-3">
-          <div class="w-8 h-8 rounded-lg bg-indigo-600/20 flex items-center justify-center flex-shrink-0">
-            <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>
-          </div>
-          <div>
-            <p class="text-white text-sm font-medium"><span id="conf-url-count">0</span> PubMed article(s)</p>
-            <p class="text-slate-500 text-xs">Original PDFs from PMC Open Access</p>
-          </div>
-        </div>
+      <!-- Condition cards -->
+      <div id="condition-cards"></div>
+
+      <!-- No-conditions warning -->
+      <div id="no-cond-warn" class="px-4 py-4 rounded-xl bg-amber-500/8 border border-amber-500/20 text-amber-400 text-sm mb-4 flex items-center gap-3">
+        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+        No conditions yet. Click <strong class="text-amber-300 mx-1">Add Condition</strong> below to start.
       </div>
 
-      <!-- Debug accordion -->
-      <details class="glass rounded-xl mb-6 overflow-hidden">
-        <summary class="flex items-center justify-between px-5 py-3 text-slate-400 text-sm font-medium hover:text-white transition-colors">
+      <!-- Add condition button -->
+      <button class="btn-add-cond mb-8" onclick="addCondCard('', [])">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+        Add Condition
+      </button>
+
+      <!-- Debug accordion (memo extraction log) -->
+      <details id="debug-accordion" class="glass rounded-xl mb-6 overflow-hidden hidden">
+        <summary class="flex items-center justify-between px-5 py-3 text-slate-400 text-sm font-medium hover:text-white transition-colors cursor-pointer">
           <span class="flex items-center gap-2">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>
-            Extraction debug log
+            Memo extraction log
           </span>
           <svg class="chev w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
         </summary>
         <div class="debug-box px-4 py-3" id="debug-log"></div>
       </details>
 
+      <!-- Actions -->
       <div class="flex items-center justify-between">
         <button onclick="resetApp()" class="btn-secondary">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
           Back
         </button>
-        <button id="btn-confirm" class="btn-primary" onclick="startProcess()">Confirm &amp; Build Packets</button>
+        <button id="btn-confirm" class="btn-primary" disabled onclick="startProcess()">Add at least one condition</button>
       </div>
     </section>
 
@@ -359,12 +400,12 @@
           <div class="w-6 h-px bg-white/10"></div>
           <div class="flex items-center gap-2 text-xs">
             <div class="stage-dot" id="dot-filling_esf"></div>
-            <span id="lbl-filling_esf" class="text-slate-500">Fill ESF (per condition)</span>
+            <span id="lbl-filling_esf" class="text-slate-500">Fill ESF</span>
           </div>
           <div class="w-6 h-px bg-white/10"></div>
           <div class="flex items-center gap-2 text-xs">
             <div class="stage-dot" id="dot-merging"></div>
-            <span id="lbl-merging" class="text-slate-500">Merge &amp; Add Headers</span>
+            <span id="lbl-merging" class="text-slate-500">Merge &amp; Headers</span>
           </div>
         </div>
 
@@ -547,13 +588,9 @@
       chkReady();
     });
     function chkReady() {
-      const ok = memoFile && esfFile;
-      document.getElementById('btn-run').disabled = !ok;
-      document.getElementById('upload-hint').textContent =
-        memoFile && !esfFile ? 'Upload the ESF PDF to continue' :
-        !memoFile && esfFile ? 'Upload the memorandum to continue' :
-        ok                   ? 'Both files ready — click Analyze & Continue' :
-                               'Upload both files to continue';
+      const ready = !!esfFile;
+      document.getElementById('btn-run').disabled = !ready;
+      document.getElementById('upload-hint').textContent = ready ? '' : 'Upload the ESF to continue';
     }
     function fmtB(b) {
       if (b < 1024) return b + ' B';
@@ -561,17 +598,24 @@
       return (b/1048576).toFixed(1) + ' MB';
     }
 
-    // ── Phase 1: parse memo ────────────────────────────────────────
+    // ── Phase 1: start job ─────────────────────────────────────────
     async function startParse() {
-      if (!memoFile) return;
       document.getElementById('btn-run').disabled = true;
       show('parsing');
 
-      const fd = new FormData(); fd.append('file', memoFile);
-      let resp, data;
-      try { resp = await fetch('/upload', { method:'POST', body:fd }); data = await resp.json(); }
-      catch(e) { showError('Network error: ' + e.message); return; }
-      if (!resp.ok) { showError(data.error || 'Upload failed'); return; }
+      let data;
+      if (memoFile) {
+        const fd = new FormData(); fd.append('file', memoFile);
+        let resp;
+        try { resp = await fetch('/upload', { method:'POST', body:fd }); data = await resp.json(); }
+        catch(e) { showError('Network error: ' + e.message); return; }
+        if (!resp.ok) { showError(data.error || 'Upload failed'); return; }
+      } else {
+        let resp;
+        try { resp = await fetch('/new-job', { method:'POST' }); data = await resp.json(); }
+        catch(e) { showError('Network error: ' + e.message); return; }
+        if (!resp.ok) { showError((await resp.json().catch(()=>({}))).error || 'Failed to start'); return; }
+      }
 
       jobId = data.job_id;
 
@@ -587,82 +631,158 @@
 
     // ── Confirm ────────────────────────────────────────────────────
     function renderConfirm(d) {
-      document.getElementById('conf-vet').textContent = d.vet_name || 'Unknown Veteran';
-      // Prefer the manually-entered VA number; fall back to auto-extracted
-      const manualVa = (document.getElementById('inp-va-num')?.value || '').replace(/[^0-9]/g, '');
+      // Vet name / SSN row — only show when memo provided useful data
+      const vetName = d.vet_name || '';
+      const manualVa  = (document.getElementById('inp-va-num')?.value || '').replace(/[^0-9]/g, '');
       const displayVa = manualVa || d.va_file_number || '';
-      document.getElementById('conf-va-num').textContent = displayVa ? `SSN ${displayVa}` : '';
-      document.getElementById('conf-url-count').textContent= d.url_count ?? 0;
+      const vetRow    = document.getElementById('conf-vet-row');
+      if (vetName || displayVa) {
+        document.getElementById('conf-vet').textContent   = vetName;
+        document.getElementById('conf-va-num').textContent = displayVa ? `SSN ${displayVa}` : '';
+        vetRow.classList.remove('hidden');
+      } else {
+        vetRow.classList.add('hidden');
+      }
+
       document.getElementById('conf-esf-name').textContent = esfFile ? esfFile.name : '(none)';
 
+      // Build condition cards (auto-suggested from memo, or blank)
       const container = document.getElementById('condition-cards');
       container.innerHTML = '';
       const conds = d.illnesses_clean || [];
       document.getElementById('no-cond-warn').classList.toggle('hidden', conds.length > 0);
-      conds.forEach(c => addCondCard(c, true));
+      conds.forEach(c => addCondCard(c, []));
 
-      const dbg = document.getElementById('debug-log');
-      dbg.innerHTML = (d.extraction_debug || []).map(line => {
-        let cls = 'text-slate-500';
-        if (line.startsWith('[accept]'))     cls = 'text-green-400';
-        if (line.startsWith('[skip]'))       cls = 'text-red-400';
-        if (line.startsWith('[dedup]'))      cls = 'text-amber-400';
-        if (line.startsWith('[memo-title]')) cls = 'text-indigo-300';
-        if (line.startsWith('[result]'))     cls = 'text-white font-semibold';
-        return `<div class="${cls}">${esc(line)}</div>`;
-      }).join('');
+      // Extraction debug log — only show accordion when memo was uploaded
+      const dbgLines  = d.extraction_debug || [];
+      const accordion = document.getElementById('debug-accordion');
+      const hasMemo   = dbgLines.some(l => !l.startsWith('No memo'));
+      accordion.classList.toggle('hidden', !hasMemo);
+      if (hasMemo) {
+        document.getElementById('debug-log').innerHTML = dbgLines.map(line => {
+          let cls = 'text-slate-500';
+          if (line.startsWith('[accept]'))     cls = 'text-green-400';
+          if (line.startsWith('[skip]'))       cls = 'text-red-400';
+          if (line.startsWith('[dedup]'))      cls = 'text-amber-400';
+          if (line.startsWith('[memo-title]')) cls = 'text-indigo-300';
+          if (line.startsWith('[result]'))     cls = 'text-white font-semibold';
+          return `<div class="${cls}">${esc(line)}</div>`;
+        }).join('');
+      }
 
       refreshConfirmBtn();
     }
 
-    function addCondCard(cond, checked) {
-      const container = document.getElementById('condition-cards');
-      const id = 'c' + Math.random().toString(36).slice(2);
-      const lbl = document.createElement('label');
-      lbl.className = 'condition-card ' + (checked ? 'selected' : 'deselected');
-      lbl.setAttribute('for', id);
-      lbl.innerHTML = `
-        <div class="flex items-center gap-3 w-full">
-          <input type="checkbox" id="${id}" ${checked?'checked':''} onchange="toggleCond(this)" />
-          <span class="text-white text-sm font-medium flex-1">${esc(cond)}</span>
-          <button type="button" onclick="removeCond(this)" class="text-slate-600 hover:text-red-400 transition-colors" title="Remove">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
-          </button>
-        </div>`;
-      container.appendChild(lbl);
+    // ── Condition builder helpers ──────────────────────────────────
+    function _urlRowHtml(url) {
+      return `<div class="url-row">
+        <input type="text" class="url-input" value="${esc(url)}"
+          placeholder="https://pubmed.ncbi.nlm.nih.gov/…"
+          oninput="refreshConfirmBtn()" />
+        <button type="button" class="btn-rm-url" onclick="removeUrlRow(this)" title="Remove URL">
+          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>`;
     }
-    function toggleCond(cb) {
-      const card = cb.closest('.condition-card');
-      card.classList.toggle('selected', cb.checked);
-      card.classList.toggle('deselected', !cb.checked);
-      refreshConfirmBtn();
-    }
-    function removeCond(btn) { btn.closest('.condition-card').remove(); refreshConfirmBtn(); }
-    function addManual() {
-      const inp = document.getElementById('manual-cond'), val = inp.value.trim();
-      if (!val) return;
+
+    function addCondCard(condName, urls) {
       document.getElementById('no-cond-warn').classList.add('hidden');
-      addCondCard(val, true); inp.value = ''; refreshConfirmBtn();
+      const container = document.getElementById('condition-cards');
+      const card = document.createElement('div');
+      card.className = 'cond-card';
+      const urlRows = (urls && urls.length > 0 ? urls : ['']).map(_urlRowHtml).join('');
+      card.innerHTML = `
+        <div class="flex items-center gap-3 mb-4">
+          <input type="text" class="cond-name-input" value="${esc(condName || '')}"
+            placeholder="Enter condition name…"
+            oninput="refreshConfirmBtn()" />
+          <button type="button" class="btn-rm-cond" onclick="removeCondCard(this)">Remove</button>
+        </div>
+        <div class="text-slate-500 text-xs mb-2 font-medium uppercase tracking-wide">Research URLs</div>
+        <div class="url-list mb-2">${urlRows}</div>
+        <button type="button" class="btn-add-url" onclick="addUrlRow(this)">+ Add URL</button>`;
+      container.appendChild(card);
+      // Focus the name field if blank
+      if (!condName) card.querySelector('.cond-name-input').focus();
+      refreshConfirmBtn();
     }
+
+    function addUrlRow(addBtn) {
+      const list = addBtn.previousElementSibling; // .url-list
+      const div = document.createElement('div');
+      div.className = 'url-row';
+      div.innerHTML = `
+        <input type="text" class="url-input" placeholder="https://pubmed.ncbi.nlm.nih.gov/…"
+          oninput="refreshConfirmBtn()" />
+        <button type="button" class="btn-rm-url" onclick="removeUrlRow(this)" title="Remove URL">
+          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>`;
+      list.appendChild(div);
+      div.querySelector('.url-input').focus();
+    }
+
+    function removeUrlRow(btn) {
+      const row  = btn.closest('.url-row');
+      const list = row.parentElement;
+      row.remove();
+      // Always keep at least one blank row
+      if (!list.querySelector('.url-row')) {
+        const div = document.createElement('div');
+        div.className = 'url-row';
+        div.innerHTML = `
+          <input type="text" class="url-input" placeholder="https://pubmed.ncbi.nlm.nih.gov/…"
+            oninput="refreshConfirmBtn()" />
+          <button type="button" class="btn-rm-url" onclick="removeUrlRow(this)" title="Remove URL">
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>`;
+        list.appendChild(div);
+      }
+      refreshConfirmBtn();
+    }
+
+    function removeCondCard(btn) {
+      btn.closest('.cond-card').remove();
+      const remaining = document.querySelectorAll('.cond-card').length;
+      document.getElementById('no-cond-warn').classList.toggle('hidden', remaining > 0);
+      refreshConfirmBtn();
+    }
+
+    function addManual() { addCondCard('', []); }
+
+    // Returns [{condition, urls}] — skips cards with blank condition name
     function getSelected() {
-      return [...document.querySelectorAll('#condition-cards input[type=checkbox]:checked')]
-        .map(cb => cb.closest('.condition-card').querySelector('span').textContent.trim());
+      const result = [];
+      document.querySelectorAll('.cond-card').forEach(card => {
+        const cond = card.querySelector('.cond-name-input').value.trim();
+        if (!cond) return;
+        const urls = [...card.querySelectorAll('.url-input')]
+          .map(i => i.value.trim()).filter(u => u);
+        result.push({ condition: cond, urls });
+      });
+      return result;
     }
+
     function refreshConfirmBtn() {
-      const n = getSelected().length, btn = document.getElementById('btn-confirm');
+      const n   = getSelected().length;
+      const btn = document.getElementById('btn-confirm');
       btn.disabled = n === 0;
       btn.textContent = n > 0
-        ? `Confirm & Build ${n} Packet${n!==1?'s':''}`
-        : 'Select at least one condition';
+        ? `Build ${n} Packet${n !== 1 ? 's' : ''}`
+        : 'Add at least one condition';
     }
 
     // ── Phase 2: start pipeline ────────────────────────────────────
     async function startProcess() {
-      const confirmed = getSelected(); if (!confirmed.length) return;
+      const cwu = getSelected(); if (!cwu.length) return;
       document.getElementById('btn-confirm').disabled = true;
       show('processing');
 
-      // Collect the manually-entered VA file number (strip non-digits)
       const rawVaNum = document.getElementById('inp-va-num')?.value || '';
       const vaNum    = rawVaNum.replace(/[^0-9]/g, '');
 
@@ -671,8 +791,8 @@
         resp = await fetch('/process/' + jobId, {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({
-            confirmed_illnesses: confirmed,
-            va_file_number:      vaNum || undefined,
+            conditions_with_urls: cwu,
+            va_file_number:       vaNum || undefined,
           }),
         });
       } catch(e) { showError('Network error: ' + e.message); return; }
@@ -693,8 +813,8 @@
     }
 
     const STAGES = {
-      downloading: { pct:30, label:'Downloading research PDFs from PMC…' },
-      filling_esf: { pct:65, label:'Filling ESF for each condition…' },
+      downloading: { pct:33, label:'Downloading research PDFs…' },
+      filling_esf: { pct:67, label:'Filling ESF for each condition…' },
       merging:     { pct:88, label:'Merging + adding page headers…' },
       done:        { pct:100,label:'Complete' },
     };
@@ -702,7 +822,7 @@
 
     function updateProcUI(d) {
       const stage = d.stage || 'downloading';
-      const info  = STAGES[stage] || { pct:50, label:'Processing…' };
+      const info  = STAGES[stage] || { pct:20, label:'Processing…' };
       document.getElementById('stage-label').textContent   = info.label;
       document.getElementById('progress-fill').style.width = info.pct + '%';
 
@@ -711,7 +831,7 @@
         const dot = document.getElementById('dot-' + s);
         const lbl = document.getElementById('lbl-' + s);
         if (!dot || !lbl) return;
-        dot.classList.remove('active','done'); lbl.classList.remove('text-white','text-slate-500');
+        dot.classList.remove('active','done'); lbl.classList.remove('text-white','text-slate-400','text-slate-500');
         if (i < idx)       { dot.classList.add('done');   lbl.classList.add('text-slate-400'); }
         else if (i === idx){ dot.classList.add('active');  lbl.classList.add('text-white'); }
         else               { lbl.classList.add('text-slate-500'); }
@@ -786,20 +906,179 @@
         grid.innerHTML = '<p class="text-slate-500 text-sm">No conditions processed.</p>';
       }
 
-      // Articles
+      // Articles — with Retry / Upload PDF controls for failed ones
       const al = document.getElementById('article-list');
       al.innerHTML = '';
       (d.article_results || []).forEach((a, i) => {
-        const div   = document.createElement('div');
-        div.className = 'article-row';
-        const pmid  = a.pmid ? `PMID ${a.pmid}` : `Article ${i+1}`;
-        const badge = a.downloaded
-          ? `<span class="pill pill-green"><svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>Downloaded</span>`
-          : `<span class="pill pill-gray">Paywalled / No PDF</span>`;
-        div.innerHTML = `<div><p class="text-white text-sm font-medium">${pmid}</p><a href="${esc(a.url)}" target="_blank" class="text-indigo-400 text-xs hover:underline">${esc(a.url)}</a></div>${badge}`;
+        const div  = document.createElement('div');
+        const pmid = a.pmid ? `PMID ${a.pmid}` : `Article ${i+1}`;
+        const conds = (a.conditions || []);
+        const primaryCond = conds[0] || '';
+        const status = a.status || (a.downloaded ? 'ok' : 'failed');
+
+        let rightCol = '';
+        if (status === 'ok') {
+          rightCol = `<span class="pill pill-green" style="white-space:nowrap">
+            <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+              <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+            </svg>Downloaded</span>`;
+        } else if (status === 'manual') {
+          rightCol = `<span class="pill pill-teal" style="white-space:nowrap">
+            <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+              <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z"/><path fill-rule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm9.707 5.707a1 1 0 00-1.414-1.414L9 12.586l-1.293-1.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+            </svg>Uploaded Manually</span>`;
+        } else {
+          // Failed — show Retry + Upload PDF buttons
+          div.classList.add('failed-row');
+          rightCol = `<div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;min-width:130px">
+            <span class="pill pill-red" style="white-space:nowrap">
+              <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+              </svg>Failed</span>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+              <button class="btn-retry" data-url="${esc(a.url)}" data-cond="${esc(primaryCond)}" onclick="retryArticle(this)">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                </svg>Retry
+              </button>
+              <button class="btn-upload-art" data-url="${esc(a.url)}" data-cond="${esc(primaryCond)}" onclick="triggerArticleUpload(this)">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/>
+                </svg>Upload PDF
+              </button>
+            </div>
+          </div>`;
+        }
+
+        div.className = 'article-row' + (status === 'failed' ? ' failed-row' : '');
+        div.dataset.url  = a.url;
+        div.dataset.cond = primaryCond;
+        div.innerHTML = `
+          <div style="min-width:0;flex:1">
+            <p class="text-white text-sm font-medium">${esc(pmid)}</p>
+            <a href="${esc(a.url)}" target="_blank" class="text-indigo-400 text-xs hover:underline" style="word-break:break-all">${esc(a.url)}</a>
+            ${conds.length > 1 ? `<p class="text-slate-600 text-xs mt-0.5">${conds.map(esc).join(', ')}</p>` : ''}
+          </div>
+          ${rightCol}`;
         al.appendChild(div);
       });
-      if (!d.article_results?.length) al.innerHTML = '<p class="text-slate-500 text-sm">No PubMed articles found.</p>';
+      if (!d.article_results?.length) al.innerHTML = '<p class="text-slate-500 text-sm">No articles processed.</p>';
+    }
+
+    // ── Retry a single failed article ──────────────────────────────
+    async function retryArticle(btn) {
+      const url  = btn.dataset.url;
+      const cond = btn.dataset.cond;
+      const row  = btn.closest('.article-row');
+
+      btn.disabled = true;
+      btn.innerHTML = `<span class="spinner" style="width:12px;height:12px;border-width:1.5px"></span> Retrying…`;
+
+      try {
+        const resp = await fetch(`/retry-article/${jobId}`, {
+          method:  'POST',
+          headers: {'Content-Type':'application/json'},
+          body:    JSON.stringify({condition: cond, url}),
+        });
+        const data = await resp.json();
+
+        if (data.ok) {
+          // Mark row as downloaded
+          row.classList.remove('failed-row');
+          row.querySelector('div[style*="flex-direction"]').outerHTML =
+            `<span class="pill pill-green" style="white-space:nowrap">
+               <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                 <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+               </svg>Downloaded</span>`;
+          // Refresh packet download button for this condition
+          _refreshPacketCard(cond, data.packet_url);
+        } else {
+          btn.disabled = false;
+          btn.innerHTML = `<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>Retry`;
+          // Show error as tooltip/title
+          btn.title = data.error || 'Retry failed';
+          btn.style.borderColor = 'rgba(239,68,68,.5)';
+        }
+      } catch (e) {
+        btn.disabled = false;
+        btn.innerHTML = `<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>Retry`;
+      }
+    }
+
+    // ── Upload a replacement PDF manually ──────────────────────────
+    function triggerArticleUpload(btn) {
+      const url  = btn.dataset.url;
+      const cond = btn.dataset.cond;
+      const inp  = document.createElement('input');
+      inp.type   = 'file';
+      inp.accept = 'application/pdf,.pdf';
+      inp.onchange = () => {
+        if (inp.files[0]) _doArticleUpload(btn, url, cond, inp.files[0]);
+      };
+      inp.click();
+    }
+
+    async function _doArticleUpload(btn, url, cond, file) {
+      const row = btn.closest('.article-row');
+      btn.disabled = true;
+      btn.innerHTML = `<span class="spinner" style="width:12px;height:12px;border-width:1.5px"></span> Uploading…`;
+      const retryBtn = row.querySelector('.btn-retry');
+      if (retryBtn) retryBtn.disabled = true;
+
+      const fd = new FormData();
+      fd.append('condition', cond);
+      fd.append('url',       url);
+      fd.append('file',      file);
+
+      try {
+        const resp = await fetch(`/upload-article-pdf/${jobId}`, {
+          method: 'POST', body: fd,
+        });
+        const data = await resp.json();
+
+        if (data.ok) {
+          row.classList.remove('failed-row');
+          row.querySelector('div[style*="flex-direction"]').outerHTML =
+            `<span class="pill pill-teal" style="white-space:nowrap">
+               <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                 <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z"/>
+                 <path fill-rule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm9.707 5.707a1 1 0 00-1.414-1.414L9 12.586l-1.293-1.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+               </svg>Uploaded Manually</span>`;
+          _refreshPacketCard(cond, data.packet_url);
+        } else {
+          btn.disabled = false;
+          btn.innerHTML = `<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>Upload PDF`;
+          if (retryBtn) retryBtn.disabled = false;
+          alert('Upload failed: ' + (data.error || 'Unknown error'));
+        }
+      } catch (e) {
+        btn.disabled = false;
+        btn.innerHTML = `<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>Upload PDF`;
+        if (retryBtn) retryBtn.disabled = false;
+      }
+    }
+
+    // Update a specific packet card's download button and PDF count
+    function _refreshPacketCard(cond, packetUrl) {
+      const grid = document.getElementById('packet-grid');
+      const cards = grid.querySelectorAll('.packet-card');
+      cards.forEach(card => {
+        const h4 = card.querySelector('h4');
+        if (h4 && h4.textContent.trim() === cond) {
+          // Replace or add download button
+          let dlBtn = card.querySelector('.btn-dl');
+          if (!dlBtn) {
+            dlBtn = document.createElement('button');
+            dlBtn.className = 'btn-dl';
+            card.appendChild(dlBtn);
+          }
+          dlBtn.innerHTML = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg> Download Packet`;
+          dlBtn.onclick = () => { window.location = packetUrl; };
+          // Remove "no ESF" note if present
+          const note = card.querySelector('p.italic');
+          if (note) note.remove();
+        }
+      });
     }
 
     function downloadPacket(condition) {
@@ -820,11 +1099,11 @@
       document.getElementById('dz-memo').classList.remove('has-file');
       document.getElementById('dz-esf').classList.remove('has-file');
       document.getElementById('memo-label').textContent = 'Drop .docx or .pdf';
-      document.getElementById('memo-sub').textContent   = 'Conditions extracted from this file only';
+      document.getElementById('memo-sub').textContent   = 'Auto-fills vet name, SSN, and condition suggestions';
       document.getElementById('esf-label').textContent  = 'Drop .pdf ESF here';
       document.getElementById('esf-sub').textContent    = 'One filled copy created per condition';
       document.getElementById('btn-run').disabled = true;
-      document.getElementById('upload-hint').textContent = 'Upload both files to continue';
+      document.getElementById('upload-hint').textContent = 'Upload the ESF to continue';
       document.getElementById('log-box').innerHTML = '';
       document.getElementById('progress-fill').style.width = '8%';
       document.getElementById('condition-cards').innerHTML = '';
