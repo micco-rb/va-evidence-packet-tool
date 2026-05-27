@@ -105,8 +105,6 @@ _PDF_OPTS = dict(
 )
 
 # ── Interstitial / browser-check phrases ──────────────────────────────────────
-# Any of these in page body text means we caught a redirect/challenge page,
-# not the real article.  We must wait until they all disappear.
 _INTERSTITIAL_PHRASES = [
     "checking your browser",
     "automatically redirected",
@@ -119,8 +117,21 @@ _INTERSTITIAL_PHRASES = [
     "browser verification",
 ]
 
-# JS expression passed to wait_for_function — returns true when the page no
-# longer contains any interstitial phrase (i.e. real content has loaded).
+# Selectors that are present on real article / abstract pages but never on
+# interstitial pages.  Checked in order — first match wins.
+_ARTICLE_SELECTORS = [
+    "#article-details",          # PubMed article wrapper
+    ".abstract-content",         # PubMed abstract body
+    "#abstract",                 # common abstract id
+    ".article-page",
+    ".full-view",
+    "article",                   # HTML5 semantic element
+    ".article",
+    ".content-main",
+    "main",                      # broad fallback
+]
+
+# Returns true once ALL interstitial phrases have left the body text.
 _INTERSTITIAL_CLEAR_JS = """
 (phrases) => {
     const txt = document.body ? document.body.innerText.toLowerCase() : '';
@@ -129,55 +140,95 @@ _INTERSTITIAL_CLEAR_JS = """
 """
 
 
-def _wait_past_interstitial(page, interstitial_timeout_ms: int = 35_000) -> None:
+def _wait_for_article(page, timeout_ms: int = 12_000) -> None:
     """
-    Called after the initial goto().  If the page is showing a browser-check
-    interstitial (Cloudflare / NCBI / PubMed redirect), waits until:
-
-      1. All interstitial phrases disappear from the DOM body text, AND
-      2. The network goes idle again (real page finished loading).
-
-    If no interstitial is present this function returns immediately.
-    On timeout it logs a warning and continues — page.pdf() will still
-    capture whatever is visible.
+    Poll article-content selectors until one becomes visible.
+    Logs the first match; logs a warning if none appear within the timeout.
     """
-    # Fast path: read visible text and check for any interstitial phrase.
+    per_sel_ms = max(1_500, timeout_ms // len(_ARTICLE_SELECTORS))
+    for sel in _ARTICLE_SELECTORS:
+        try:
+            page.wait_for_selector(sel, state="visible", timeout=per_sel_ms)
+            print(f"  [pw] article content visible: {sel!r}  url={page.url!r}",
+                  flush=True)
+            return
+        except Exception:
+            continue
+    print(f"  [pw] no article selector matched — proceeding", flush=True)
+
+
+def _wait_past_interstitial(page, interstitial_timeout_ms: int = 45_000) -> None:
+    """
+    Called after the initial goto().
+
+    Flow:
+      1. Read body text. If no interstitial phrase is found, jump straight to
+         article-content waiting and return.
+      2. If an interstitial IS found, call wait_for_function(phrases_clear).
+         • Happy path  — phrases disappear without a navigation:
+             → wait_for_load_state(networkidle) + article selectors + settle.
+         • Navigation path — Cloudflare's JS redirect fires a page navigation
+             which causes wait_for_function to throw.  This is NOT an error;
+             it means the challenge passed and we are mid-redirect.
+             → wait_for_load_state(networkidle) on the NEW page, then article
+               selectors + settle.  Do NOT return early.
+    """
+    # ── Step 1: detect ────────────────────────────────────────────────────
     try:
         body_text = page.inner_text("body", timeout=5_000).lower()
     except Exception:
-        return                          # can't read body — skip check
+        return
 
     found = [p for p in _INTERSTITIAL_PHRASES if p in body_text]
+
     if not found:
-        return                          # no interstitial — nothing to wait for
+        # No interstitial — still wait for article content to paint
+        _wait_for_article(page, timeout_ms=8_000)
+        return
 
     print(f"  [pw] interstitial detected: {found}", flush=True)
-    print(f"  [pw] waiting up to {interstitial_timeout_ms // 1000}s for redirect to complete …",
-          flush=True)
+    print(f"  [pw] waiting up to {interstitial_timeout_ms // 1000}s …", flush=True)
 
-    # ── Wait for interstitial text to leave the DOM ────────────────────────
+    # ── Step 2: wait for challenge to clear ───────────────────────────────
+    navigation_fired = False
     try:
         page.wait_for_function(
             _INTERSTITIAL_CLEAR_JS,
             arg     = _INTERSTITIAL_PHRASES,
             timeout = interstitial_timeout_ms,
-            polling = 500,               # check every 500 ms
+            polling = 500,
         )
-        print(f"  [pw] interstitial cleared  url={page.url!r}", flush=True)
-    except Exception as exc:
-        print(f"  [pw] interstitial wait ended ({exc}) — proceeding with current page",
+        print(f"  [pw] interstitial cleared (no navigation)  url={page.url!r}",
               flush=True)
-        return
-
-    # ── Wait for the real page to finish loading ───────────────────────────
-    try:
-        page.wait_for_load_state("networkidle", timeout=20_000)
-        print(f"  [pw] networkidle after redirect  url={page.url!r}", flush=True)
     except Exception as exc:
-        print(f"  [pw] post-redirect networkidle timed out ({exc})", flush=True)
+        # Most likely cause: Cloudflare's JS redirect triggered a navigation,
+        # which invalidated the wait_for_function frame context.
+        # Treat this as "redirect in progress" — do NOT return here.
+        err_str = str(exc).lower()
+        if any(k in err_str for k in ("navigat", "detach", "target closed",
+                                       "execution context")):
+            navigation_fired = True
+            print(f"  [pw] redirect/navigation detected during wait — "
+                  f"waiting for new page to load …", flush=True)
+        else:
+            # Genuine timeout: challenge never passed.  Proceed with whatever
+            # is on screen (could still be the interstitial, but nothing more
+            # we can do).
+            print(f"  [pw] challenge wait timed out ({exc.__class__.__name__}) "
+                  f"— proceeding", flush=True)
 
-    # Small extra settle so JS-rendered content (abstracts, etc.) paints fully
-    page.wait_for_timeout(2_000)
+    # ── Step 3: wait for the (possibly new) page to reach network idle ────
+    try:
+        page.wait_for_load_state("networkidle", timeout=25_000)
+        print(f"  [pw] networkidle  url={page.url!r}", flush=True)
+    except Exception as exc:
+        print(f"  [pw] networkidle wait: {exc.__class__.__name__}", flush=True)
+
+    # ── Step 4: wait for real article content to appear ───────────────────
+    _wait_for_article(page, timeout_ms=12_000)
+
+    # Final settle for JS-painted content (abstracts rendered after hydration)
+    page.wait_for_timeout(1_500)
 
 
 # ── Core render function ───────────────────────────────────────────────────────
