@@ -11,9 +11,11 @@ Per-request context ensures thread safety (no greenlet cross-thread errors).
 """
 
 import random
+import re
 import sys
 import time
 import traceback
+from pathlib import Path
 
 from flask import Flask, request, Response, jsonify
 
@@ -124,8 +126,7 @@ _INTERSTITIAL_PHRASES = [
     "browser verification",
 ]
 
-# Selectors that are present on real article / abstract pages but never on
-# interstitial pages.  Checked in order — first match wins.
+# Selectors used by _wait_for_article (soft wait only — never rejects).
 _ARTICLE_SELECTORS = [
     "#article-details",          # PubMed article wrapper
     ".abstract-content",         # PubMed abstract body
@@ -137,6 +138,64 @@ _ARTICLE_SELECTORS = [
     ".content-main",
     "main",                      # broad fallback
 ]
+
+# ── Liberal acceptance check (used for hard validation in _one_attempt) ────────
+# Accept if ANY selector exists OR body text contains any phrase.
+_ACCEPT_SELECTORS = [
+    "#article-details",
+    "main",
+    "article",
+    ".heading-title",
+    ".abstract-content",
+    "#abstract",
+]
+_ACCEPT_TEXT_PHRASES = ["abstract", "pubmed"]
+
+# ONLY reject as "hard blocked" when one of these phrases appears in body text.
+_BLOCK_PHRASES = [
+    "checking your browser",
+    "cf-browser-verification",
+    "access denied",
+    "403 forbidden",
+]
+
+
+def _validate_article_page(page, body_lower: str = "") -> tuple[bool, str]:
+    """
+    Liberal acceptance: returns (ok, reason_string).
+
+    Accepts if ANY _ACCEPT_SELECTORS element exists in the DOM OR body text
+    contains any _ACCEPT_TEXT_PHRASES keyword.
+
+    Rejects as hard-blocked only if a _BLOCK_PHRASES phrase is present.
+    Otherwise rejects with 'no content found' so the caller can save artifacts.
+    """
+    if not body_lower:
+        try:
+            body_lower = page.inner_text("body", timeout=5_000).lower()
+        except Exception:
+            body_lower = ""
+
+    # Hard block check first — specific bot-wall phrases only
+    for phrase in _BLOCK_PHRASES:
+        if phrase in body_lower:
+            return False, f"hard block phrase: {phrase!r}"
+
+    # Liberal selector check — existence only, no waiting
+    for sel in _ACCEPT_SELECTORS:
+        try:
+            el = page.query_selector(sel)
+            if el:
+                return True, f"selector: {sel!r}"
+        except Exception:
+            continue
+
+    # Text fallback — catches paywall pages that still show the abstract
+    for phrase in _ACCEPT_TEXT_PHRASES:
+        if phrase in body_lower:
+            return True, f"text: {phrase!r}"
+
+    return False, "no accept-selector matched and no key text found"
 
 # Returns true once ALL interstitial phrases have left the body text.
 _INTERSTITIAL_CLEAR_JS = """
@@ -297,17 +356,58 @@ def _one_attempt(url: str, attempt: int, timeout: int) -> bytes:
                 print(f"  [pw] attempt {attempt} — post-interstitial "
                       f"url={page.url!r}", flush=True)
 
-            # ── Hard article validation ────────────────────────────────────
-            article_ok = _wait_for_article(page, timeout_ms=12_000)
-            print(f"  [pw] attempt {attempt} — selectors="
-                  f"{'FOUND' if article_ok else 'NOT FOUND'}  "
-                  f"final_url={page.url!r}", flush=True)
+            # ── Gather debug info before validation ───────────────────────
+            final_url = page.url
+            try:
+                page_title = page.title()
+            except Exception:
+                page_title = "(title unavailable)"
+            try:
+                body_full  = page.inner_text("body", timeout=5_000)
+                body_lower = body_full.lower()
+                body_preview = body_full[:500]
+            except Exception:
+                body_full    = ""
+                body_lower   = ""
+                body_preview = "(body unavailable)"
+
+            # ── Liberal article validation ─────────────────────────────────
+            article_ok, val_reason = _validate_article_page(page, body_lower)
+
+            # ── Full debug report (all 10 points) ─────────────────────────
+            print(f"  [pw] attempt {attempt} — DEBUG REPORT:", flush=True)
+            print(f"    1. initial_url  = {url!r}", flush=True)
+            print(f"    2. final_url    = {final_url!r}", flush=True)
+            print(f"    3. interstitial = {'YES' if interstitial_hit else 'no'}", flush=True)
+            print(f"    4. article_ok   = {article_ok}", flush=True)
+            print(f"    5. validation   = {val_reason!r}", flush=True)
+            print(f"    6. title        = {page_title!r}", flush=True)
+            print(f"    7. body[:500]   = {body_preview!r}", flush=True)
+            # 8 logged after pdf(); 9+10 logged below
 
             if not article_ok:
+                # ── Save debug artifacts before raising ────────────────────
+                m_pmid = re.search(r"/(\d+)/?$", url)
+                pmid   = m_pmid.group(1) if m_pmid else "unknown"
+                try:
+                    dbg = Path(f"debug/{pmid}/attempt_{attempt}")
+                    dbg.mkdir(parents=True, exist_ok=True)
+                    page.screenshot(path=str(dbg / "screenshot.png"),
+                                    full_page=True)
+                    (dbg / "page.html").write_text(
+                        page.content(), encoding="utf-8")
+                    print(f"    ↳ debug artifacts → {dbg}/", flush=True)
+                except Exception as dbg_exc:
+                    print(f"    ↳ artifact save failed: {dbg_exc}", flush=True)
+
+                print(f"    9. REJECTED", flush=True)
+                print(f"   10. reason: {val_reason!r}", flush=True)
                 raise ValueError(
-                    f"attempt {attempt}: article selectors not found  "
-                    f"url={page.url!r}"
+                    f"attempt {attempt}: page rejected — {val_reason}  "
+                    f"url={final_url!r}"
                 )
+
+            print(f"    9. ACCEPTED  ({val_reason})", flush=True)
 
             # ── Inject full-width print CSS ────────────────────────────────
             page.add_style_tag(content="""
