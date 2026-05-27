@@ -70,7 +70,7 @@ def _render_url(base: str, url: str) -> bytes | None:
         resp = _http.post(
             endpoint,
             json    = {"url": url},
-            timeout = 120,                  # generous — page load + PDF render
+            timeout = 360,   # 3 retry attempts × ~116 s worst-case + backoffs
         )
     except _http.exceptions.ConnectionError as exc:
         print(f"  [dl] CONNECTION ERROR: {exc}", flush=True)
@@ -151,17 +151,19 @@ async def run_downloads(
 
         if pdf_bytes:
             filename = _safe_filename(i, url)
+            saved: list[str] = []
             for folder in folders:
                 Path(folder).mkdir(parents=True, exist_ok=True)
                 dest = Path(folder) / filename
                 dest.write_bytes(pdf_bytes)
                 print(f"  [saved] {dest}  ({len(pdf_bytes):,} bytes)", flush=True)
+                saved.append(str(dest))
             downloaded += 1
-            results.append({"url": url, "downloaded": True})
+            results.append({"url": url, "downloaded": True, "saved_paths": saved})
         else:
             print(f"  [skip] No PDF returned — article omitted from packet", flush=True)
             skipped += 1
-            results.append({"url": url, "downloaded": False})
+            results.append({"url": url, "downloaded": False, "saved_paths": []})
 
         if i < len(url_illness_map):
             time.sleep(0.3)
