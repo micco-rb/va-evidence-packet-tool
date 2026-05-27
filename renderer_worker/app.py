@@ -105,7 +105,7 @@ _PDF_OPTS = dict(
         top    = "0.9in",
         left   = "0.4in",
         right  = "0.42in",
-        bottom = "0.39in",
+        bottom = "0.25in",
     ),
 )
 
@@ -261,6 +261,10 @@ def _render_pdf(url: str, timeout: int = 60_000) -> bytes:
             # Short human-like pause before navigation
             page.wait_for_timeout(400)
 
+            # ── Pre-navigation: full-height viewport for long articles ──────
+            page.set_viewport_size({"width": 1400, "height": 2200})
+            print(f"  [pw] viewport set 1400x2200", flush=True)
+
             # ── Step 1: navigate ───────────────────────────────────────────
             print(f"  [pw] goto {url!r}  timeout={timeout}", flush=True)
             try:
@@ -302,7 +306,19 @@ def _render_pdf(url: str, timeout: int = 60_000) -> bytes:
                     "interstitial not cleared. PMID will be skipped."
                 )
 
-            # ── Step 6: mandatory 3 s settle before printing ───────────────
+            # ── Step 6: inject full-width CSS + mandatory 3 s settle ──────
+            print(f"  [pw] injecting print layout CSS …", flush=True)
+            page.add_style_tag(content="""
+html, body {
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow-x: hidden !important;
+}
+main, article, .article-page {
+    max-width: 100% !important;
+}
+""")
             print(f"  [pw] article validated — settling 3 s …", flush=True)
             page.wait_for_timeout(3_000)
 
