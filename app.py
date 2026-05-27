@@ -33,6 +33,7 @@ from flask import (
 import downloader
 import esf_filler
 from main import (
+    CONDITION_PATTERNS as _COND_PATTERNS,
     create_folders,
     extract_docx_text,
     extract_illnesses_smart,
@@ -61,31 +62,103 @@ def _pubmed_urls(text: str) -> list[str]:
     return [u for u in extract_urls(text) if "pubmed.ncbi.nlm.nih.gov" in u]
 
 
-def _nearest_condition(url: str, text: str, confirmed: list[str]) -> str | None:
+def _build_url_condition_map(
+    text: str,
+    urls: list[str],
+    confirmed: list[str],
+) -> dict[str, str]:
     """
-    Return whichever confirmed condition name appears closest (by character
-    distance) to this URL's position in the text, within a 3000-char radius.
+    Assign each URL to exactly one confirmed condition.
 
-    Returns None if no condition name is found within the radius.
+    Strategy 1 — section-based parsing:
+        Scan each line for a short condition-header line (≤80 chars, ending
+        in ':', matching a CONDITION_PATTERN).  URLs that appear between two
+        such headers are assigned to the first header's condition.
+        Handles formats like:
+            "Sleep Apnea:"
+            "I. Obstructive Sleep Apnea (OSA):"
+            "Re: Sleep Apnea"
+
+    Strategy 2 — pattern proximity:
+        For unassigned URLs, search for the nearest regex match from
+        CONDITION_PATTERNS in the full text (no hard distance cap).
+        Uses all synonyms/abbreviations, not just the canonical name.
+
+    Strategy 3 — fallback:
+        Any still-unassigned URL goes to confirmed[0].
     """
-    idx = text.find(url)
-    if idx == -1:
-        return None
-    text_lower  = text.lower()
-    best_cond   = None
-    best_dist   = float("inf")
-    for cond in confirmed:
-        cond_lower = cond.lower()
-        pos = 0
-        while True:
-            p = text_lower.find(cond_lower, pos)
-            if p == -1:
+    if not urls:
+        return {}
+    if len(confirmed) == 1:
+        return {u: confirmed[0] for u in urls}
+
+    url_to_cond: dict[str, str] = {}
+
+    # ── Strategy 1: section-header-based ─────────────────────────────────
+    # Walk line-by-line, building (char_offset, canonical_condition) markers.
+    section_markers: list[tuple[int, str]] = []
+    char_pos = 0
+    for line in text.split("\n"):
+        stripped = line.strip()
+        # Only consider short lines — section headers are never long paragraphs
+        if stripped and len(stripped) <= 80:
+            # Remove leading numbering / label prefixes before matching
+            test = re.sub(
+                r"^(?:re:|condition:|claimed\s+condition:|[ivxlIVXL]+\.?\s*|\d+\.\s*)",
+                "", stripped, flags=re.IGNORECASE,
+            ).strip().rstrip(":").strip()
+
+            # Line must consist only of words/spaces/parens/hyphens (no long
+            # prose sentences) — this stops paragraph lines from being headers
+            if test and re.fullmatch(r"[\w\s\(\)/\-,'.]+", test):
+                for pat, canonical in _COND_PATTERNS:
+                    if canonical in confirmed and re.search(pat, test, re.IGNORECASE):
+                        section_markers.append((char_pos, canonical))
+                        break
+
+        char_pos += len(line) + 1   # +1 for the newline
+
+    section_markers.sort(key=lambda x: x[0])
+
+    for url in urls:
+        url_pos = text.find(url)
+        if url_pos == -1:
+            continue
+        for i, (mpos, cond) in enumerate(section_markers):
+            next_pos = (section_markers[i + 1][0]
+                        if i + 1 < len(section_markers) else len(text))
+            if mpos <= url_pos < next_pos:
+                url_to_cond[url] = cond
                 break
-            d = abs(p - idx)
-            if d < best_dist:
-                best_dist, best_cond = d, cond
-            pos = p + 1
-    return best_cond if best_dist <= 3000 else None
+
+    # ── Strategy 2: pattern proximity ────────────────────────────────────
+    # For each unassigned URL, find the nearest occurrence of ANY synonym /
+    # abbreviation from CONDITION_PATTERNS (not just the canonical name).
+    for url in urls:
+        if url in url_to_cond:
+            continue
+        url_pos = text.find(url)
+        if url_pos == -1:
+            url_to_cond[url] = confirmed[0]
+            continue
+
+        best_cond = None
+        best_dist = float("inf")
+        for pat, canonical in _COND_PATTERNS:
+            if canonical not in confirmed:
+                continue
+            for m in re.finditer(pat, text, re.IGNORECASE):
+                d = abs(m.start() - url_pos)
+                if d < best_dist:
+                    best_dist, best_cond = d, canonical
+
+        url_to_cond[url] = best_cond if best_cond else confirmed[0]
+
+    # ── Strategy 3: any remaining → first condition ───────────────────────
+    for url in urls:
+        url_to_cond.setdefault(url, confirmed[0])
+
+    return url_to_cond
 
 
 def _cond_slug(condition: str) -> str:
@@ -155,19 +228,17 @@ def _pipeline(job_id: str, confirmed: list[str]):
             slug_dir.mkdir(exist_ok=True)
             cond_folders[cond] = slug_dir
 
-        # Assign each URL to exactly one condition — the nearest one in the text.
-        # If a URL cannot be matched to any condition (extremely rare), assign it
-        # to the first confirmed condition rather than broadcasting to all of them.
-        # Use a list (not just a dict) so duplicate URLs are each processed once.
+        # Assign each URL to exactly one condition using section-based parsing
+        # then pattern-proximity matching (see _build_url_condition_map).
+        url_to_cond = _build_url_condition_map(text, urls, confirmed)
+
         seen_urls: set[str] = set()
-        url_to_cond: dict[str, str] = {}
         url_map: list[tuple[str, list[str]]] = []
         for url in urls:
             if url in seen_urls:
                 continue          # skip exact duplicates — one download per URL
             seen_urls.add(url)
-            cond = _nearest_condition(url, text, confirmed) or confirmed[0]
-            url_to_cond[url] = cond
+            cond = url_to_cond.get(url, confirmed[0])
             url_map.append((url, [str(cond_folders[cond])]))
             log(f"  {url} → {cond}")
 

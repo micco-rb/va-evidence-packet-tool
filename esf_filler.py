@@ -425,6 +425,11 @@ def fill_esf_for_condition(
     Locates the 'OTHER (Describe)' checkbox, stamps an X, and writes
     '<condition> Research Document Attached' in the describe area.
 
+    Both the AcroForm path (field values) AND the visual overlay path
+    (explicit X mark drawn via reportlab) are always applied.
+    pypdf's AcroForm update does not regenerate appearance streams, so the
+    checkbox would be invisible without the visual overlay running too.
+
     Parameters
     ----------
     esf_path         : original ESF PDF
@@ -433,9 +438,18 @@ def fill_esf_for_condition(
     research_entries : list of dicts with 'pmid', 'filename', 'downloaded'
     """
     print(f"\n[fill-esf] condition={condition!r}")
-    if _try_acroform(esf_path, output_path, condition, research_entries):
-        return output_path
-    _fill_overlay(esf_path, output_path, condition, research_entries)
+
+    # Step 1 — AcroForm: update field values (text fields, checkbox states).
+    # Even when this succeeds, we still run the visual overlay below because
+    # pypdf doesn't rebuild /AP appearance streams, leaving checkboxes invisible.
+    acroform_ok = _try_acroform(esf_path, output_path, condition, research_entries)
+
+    # Step 2 — Visual overlay: always draw the explicit X mark + condition text.
+    # Source is the acroform-updated file (if it was written), otherwise original.
+    overlay_source = (output_path
+                      if acroform_ok and Path(output_path).exists()
+                      else esf_path)
+    _fill_overlay(overlay_source, output_path, condition, research_entries)
     return output_path
 
 
@@ -712,15 +726,30 @@ def _build_sig_overlay(
         if i == page_idx:
             # ── Signature image ──────────────────────────────────
             try:
-                c.drawImage(
-                    ImageReader(str(sig_path)),
-                    anchors["sig_x"],
-                    anchors["sig_y"],
-                    width  = 160,
-                    height = 36,
-                    preserveAspectRatio = True,
-                    mask = "auto",
-                )
+                # mask=[240,255, 240,255, 240,255] treats near-white pixels as
+                # transparent, removing solid white backgrounds while preserving
+                # dark ink strokes. Falls back to alpha-channel mask if drawImage
+                # rejects the color range (e.g. CMYK or palette-mode images).
+                try:
+                    c.drawImage(
+                        ImageReader(str(sig_path)),
+                        anchors["sig_x"],
+                        anchors["sig_y"],
+                        width  = 160,
+                        height = 40,
+                        preserveAspectRatio = True,
+                        mask = [240, 255, 240, 255, 240, 255],
+                    )
+                except Exception:
+                    c.drawImage(
+                        ImageReader(str(sig_path)),
+                        anchors["sig_x"],
+                        anchors["sig_y"],
+                        width  = 160,
+                        height = 40,
+                        preserveAspectRatio = True,
+                        mask = "auto",
+                    )
             except Exception as exc:
                 print(f"  [sig-warn] Cannot draw signature image: {exc}")
 
