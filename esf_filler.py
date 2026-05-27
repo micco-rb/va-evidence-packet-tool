@@ -72,8 +72,14 @@ _FSML       = 8
 _FREG       = 9
 _FHDR       = 8
 _LH         = 13
-_MARK_FONT  = 8        # point size for the "X" mark glyph (must fit inside checkbox)
+_MARK_FONT  = 7        # point size for the "X" mark glyph (smaller = fits checkbox cleanly)
 _CHECKBOX_OFFSET = 9   # points left of "OTHER" text where the checkbox sits
+
+# ── Debug mode ────────────────────────────────────────────────────────────
+# Set True to draw red rectangles around detected field bounds and print
+# overlay coordinates.  Useful for calibration — flip to False for production.
+import os as _os
+_DEBUG_OVERLAY = _os.environ.get("ESF_DEBUG_OVERLAY", "").lower() in ("1", "true", "yes")
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -102,39 +108,49 @@ def _words(page) -> list[dict]:
 
 def _find_other_describe(words: list[dict], ph: float) -> dict | None:
     """
-    Locate the 'OTHER (Describe)' area on a page.
+    Locate the LAST 'OTHER (Describe)' area on a page.
 
-    Searches for a word containing 'OTHER' and a nearby word containing
-    'Describe' (within ±8 pts vertically or immediately after).  Handles
-    common VA-form layouts where the two tokens may be:
-      • separate words on the same line:  "OTHER  (Describe):"
-      • merged into one token:            "OTHER(Describe)"
-      • split across tokens with punctuation
+    The ESF has multiple 'OTHER' checkboxes (Section I, II, and IV).
+    We want the LAST one — the evidence-type checkbox in Section IV —
+    not the first occurrence in the claimant/relationship sections.
 
     Returns a dict with reportlab coordinates or None if not found.
     """
-    other_w    = None
-    describe_w = None
+    # Collect all candidate matches: list of (other_word, describe_word|None)
+    candidates: list[tuple[dict, dict | None]] = []
 
-    for w in words:
+    i = 0
+    while i < len(words):
+        w = words[i]
         t = w.get("text", "")
-        # Match the word that starts with OTHER (may have trailing punctuation)
-        if re.search(r"\bOTHER\b", t, re.IGNORECASE) and other_w is None:
+        if re.search(r"\bOTHER\b", t, re.IGNORECASE):
             other_w = w
-            # If this single token already contains "Describe" (merged token),
-            # treat it as both anchor and describe label.
+            describe_w: dict | None = None
+
+            # Merged token — "OTHER(Describe)" in one word
             if re.search(r"Describe", t, re.IGNORECASE):
                 describe_w = w
-                break
-        elif other_w is not None and describe_w is None:
-            # Accept any subsequent word containing "Describe" that is on the
-            # same horizontal band (within 8 pts) or up to 2 words later.
-            vert_diff = abs(float(w.get("top", 0)) - float(other_w.get("top", 0)))
-            if re.search(r"Describe", t, re.IGNORECASE) and vert_diff <= 8:
-                describe_w = w
-                break
+            else:
+                # Look at subsequent words on the same horizontal band (≤8 pt)
+                for j in range(i + 1, min(i + 5, len(words))):
+                    nw = words[j]
+                    nt = nw.get("text", "")
+                    vert_diff = abs(float(nw.get("top", 0)) - float(w.get("top", 0)))
+                    if re.search(r"Describe", nt, re.IGNORECASE) and vert_diff <= 8:
+                        describe_w = nw
+                        break
 
-    if other_w is None:
+            candidates.append((other_w, describe_w))
+        i += 1
+
+    # Prefer pairs that have a (Describe) companion; among those take the last.
+    # Fall back to the last plain OTHER if no pair found.
+    paired = [(ow, dw) for ow, dw in candidates if dw is not None]
+    if paired:
+        other_w, describe_w = paired[-1]
+    elif candidates:
+        other_w, describe_w = candidates[-1]
+    else:
         return None
 
     ox0   = float(other_w["x0"])
@@ -194,14 +210,24 @@ def _build_condition_overlay(
             xm, ym = anchors["x_mark"], anchors["y_mark"]
             xt, yt = anchors["x_text"], anchors["y_text"]
 
+            # ── Debug: red rectangle around checkbox area ──────────
+            if _DEBUG_OVERLAY:
+                from reportlab.lib.colors import red
+                c.setStrokeColor(red)
+                c.setLineWidth(0.5)
+                # Approximate checkbox as a 10×10 pt square
+                c.rect(xm - 1, ym - 5, 10, 10)
+                c.setStrokeColor(black)
+                print(f"  [dbg-X] xm={xm:.1f} ym={ym:.1f} page={page_idx}", flush=True)
+
             # ── X mark ─────────────────────────────────────────────
             # Center the glyph inside the checkbox square.
             # drawString places the bottom-left of the character at (x, y).
             # Cap-height of Helvetica-Bold ≈ 72% of font size.
-            # Horizontal: shift +2 pt so the X sits in the middle of the ~10 pt box.
+            # Offsets: +6 right (centres horizontally), +2 up (centres vertically).
             c.setFont(_FB, _MARK_FONT)
             cap_h  = _MARK_FONT * 0.72
-            c.drawString(xm + 2, ym - cap_h / 2, "X")
+            c.drawString(xm + 6, ym - cap_h / 2 + 2, "X")
 
             # ── Condition text ──────────────────────────────────────
             label = f"{condition} Research Document Attached"
@@ -256,14 +282,25 @@ def _build_header_overlay(
             c.setFillColor(black)
             c.setFont(_FB, _FHDR)
             left = 36          # 0.5 inch left margin
-            # Format: "Last, First" (legal-document style)
-            parts = vet_name.strip().split()
+            # Format: "Last First MiddleInit"  — no comma, no trailing period
+            raw_parts = vet_name.strip().split()
+            parts = [p.rstrip(".,") for p in raw_parts]   # strip trailing . or ,
             if len(parts) >= 2:
-                display_name = f"{parts[-1]}, {' '.join(parts[:-1])}"
+                display_name = f"{parts[-1]} {' '.join(parts[:-1])}"
             else:
-                display_name = vet_name
+                display_name = parts[0] if parts else vet_name
+            # Format SSN as "XXX XX XXXX"
+            digits = re.sub(r"\D", "", va_file_number)
+            if len(digits) == 9:
+                display_id = f"{digits[:3]} {digits[3:5]} {digits[5:]}"
+            elif len(digits) > 9:
+                # e.g. 10+ digit VA file numbers — use last 9
+                d9 = digits[-9:]
+                display_id = f"{d9[:3]} {d9[3:5]} {d9[5:]}"
+            else:
+                display_id = va_file_number
             c.drawString(left, ph - 14,              display_name)
-            c.drawString(left, ph - 14 - (_FHDR + 2), va_file_number)
+            c.drawString(left, ph - 14 - (_FHDR + 2), display_id)
 
         c.showPage()
 
@@ -739,27 +776,46 @@ def _find_sig_anchors(page, ph: float) -> dict | None:
     if sig_w is None:
         return None
 
-    sig_top  = float(sig_w["top"])
-    sig_left = float(sig_w.get("x0", 72))
+    sig_top   = float(sig_w["top"])
+    sig_left  = float(sig_w.get("x0", 72))
     sig_right = float(sig_w.get("x1", sig_left + 60))
-    # Place the signature image to the RIGHT of the label text, inside the
-    # blank field box.  Use a comfortable gap (12 pt) after the label's right
-    # edge, then shift down 8 pt from the label's top so it sits in the field.
-    sig_x    = sig_right + 12
-    sig_y    = _rl_y(sig_top + 8, ph)
+    sig_bot   = float(sig_w.get("bottom", sig_top + 12))
+
+    # sig_x: right of the label text + small gap
+    sig_x = sig_right + 18
+
+    # sig_y is computed at draw-time in _build_sig_overlay where SIG_H is known.
+    # Store a provisional value (will be overridden).
+    sig_y = _rl_y(sig_top + 5, ph)
 
     if date_w:
         date_top  = float(date_w["top"])
         date_left = float(date_w.get("x0", 350))
-        # Write the date AT the field position (overlays the MM-DD-YYYY hint).
-        # Baseline is centred in the label's bounding box height.
+        date_h    = float(date_w.get("height", 10))
         date_x    = date_left
-        date_y    = _rl_y(date_top + float(date_w.get("height", 10)) * 0.5 + 4, ph)
+        date_y    = _rl_y(date_top + date_h * 0.5, ph)   # provisional
     else:
-        date_y = sig_y
-        date_x = sig_x + 200
+        date_top  = sig_top
+        date_left = sig_x + 200
+        date_h    = float(sig_w.get("height", 10))
+        date_x    = sig_x + 200
+        date_y    = sig_y
 
-    return {"sig_x": sig_x, "sig_y": sig_y, "date_x": date_x, "date_y": date_y}
+    print(
+        f"  [sig-anchors] sig_x={sig_x:.0f}  "
+        f"date=({date_x:.0f},{date_y:.0f})  "
+        f"sig_top={sig_top:.0f}  sig_bot={sig_bot:.0f}  ph={ph:.0f}",
+        flush=True,
+    )
+    return {
+        "sig_x": sig_x, "sig_y": sig_y,
+        "date_x": date_x, "date_y": date_y,
+        # Raw pdfplumber bounds — used for centering in _build_sig_overlay
+        "sig_top": sig_top, "sig_bot": sig_bot,
+        "sig_left": sig_left, "sig_right": sig_right,
+        "date_top": date_top, "date_h": date_h,
+        "date_left": date_left if date_w else sig_x + 200,
+    }
 
 
 def _build_sig_overlay(
@@ -772,34 +828,79 @@ def _build_sig_overlay(
     """Build a transparent overlay PDF with the signature image + date string."""
     from reportlab.lib.utils import ImageReader
 
+    # Signature dimensions — ~2× previous size for visibility
+    SIG_W, SIG_H = 210, 50
+
+    # Date font
+    DATE_FONT_SIZE = 10
+
     buf = io.BytesIO()
     c   = rl_canvas.Canvas(buf)
 
     for i, (pw, ph) in enumerate(page_sizes):
         c.setPageSize((pw, ph))
         if i == page_idx:
-            # ── Signature image ──────────────────────────────────
-            # _prepare_sig_image() normalises the PNG to RGBA, converting any
-            # solid-white background to transparent pixels. mask='auto' then
-            # reads the alpha channel directly — no black rectangle artifact.
+
+            # ── Compute centered signature Y ──────────────────────
+            # Center the image vertically within the 19A field row.
+            # sig_top/sig_bot are the pdfplumber bounds of the label word;
+            # the field row is typically the same height, so we centre there.
+            s_top = anchors.get("sig_top", 0)
+            s_bot = anchors.get("sig_bot", s_top + 20)
+            field_mid_rl = ph - (s_top + s_bot) / 2        # rl y of row centre
+            sig_y = field_mid_rl - SIG_H / 2               # bottom-left of image
+
+            # ── Compute centered date Y ────────────────────────────
+            # Place the text baseline so the date is centred in the 19B box.
+            # Typical text cap-height ≈ 70% of font size; ascender above
+            # baseline ≈ 0.7×font, so subtracting 0.35×font centres visually.
+            d_top = anchors.get("date_top", s_top)
+            d_h   = anchors.get("date_h", 12.0)
+            d_mid_rl  = ph - (d_top + d_h / 2)
+            date_y    = d_mid_rl - DATE_FONT_SIZE * 0.35
+
+            # ── Debug: red/blue bounds ────────────────────────────
+            if _DEBUG_OVERLAY:
+                from reportlab.lib.colors import red, blue
+                c.setLineWidth(0.7)
+
+                c.setStrokeColor(red)
+                s_left = anchors.get("sig_left", 0)
+                s_rgt  = anchors.get("sig_right", s_left + 60)
+                c.rect(s_left, _rl_y(s_bot, ph), s_rgt - s_left, s_bot - s_top)
+
+                c.setStrokeColor(blue)
+                d_left = anchors.get("date_left", 0)
+                c.rect(d_left, _rl_y(d_top + d_h, ph), 120, d_h)
+
+                c.setStrokeColor(black)
+                print(
+                    f"  [dbg-sig] sig=({anchors['sig_x']:.0f},{sig_y:.0f}) "
+                    f"size={SIG_W}×{SIG_H}  "
+                    f"date=({anchors['date_x']:.0f},{date_y:.0f}) "
+                    f"font={DATE_FONT_SIZE}",
+                    flush=True,
+                )
+
+            # ── Signature image ───────────────────────────────────
             try:
                 sig_buf = _prepare_sig_image(sig_path)
                 c.drawImage(
                     ImageReader(sig_buf),
                     anchors["sig_x"],
-                    anchors["sig_y"],
-                    width  = 130,
-                    height = 32,
+                    sig_y,
+                    width  = SIG_W,
+                    height = SIG_H,
                     preserveAspectRatio = True,
                     mask = "auto",
                 )
             except Exception as exc:
                 print(f"  [sig-warn] Cannot draw signature image: {exc}")
 
-            # ── Date ─────────────────────────────────────────────
+            # ── Date — plain drawString, no per-character spacing ─
             c.setFillColor(black)
-            c.setFont(_F, 10)
-            c.drawString(anchors["date_x"], anchors["date_y"], date_str)
+            c.setFont(_F, DATE_FONT_SIZE)
+            c.drawString(anchors["date_x"], date_y, date_str)
 
         c.showPage()
 
