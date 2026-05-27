@@ -10,7 +10,9 @@ fingerprinting to avoid anti-bot 403 responses on PubMed / publisher pages.
 Per-request context ensures thread safety (no greenlet cross-thread errors).
 """
 
+import random
 import sys
+import time
 import traceback
 
 from flask import Flask, request, Response, jsonify
@@ -237,77 +239,77 @@ def _wait_past_interstitial(page, interstitial_timeout_ms: int = 45_000) -> None
     page.wait_for_timeout(1_500)
 
 
-# ── Core render function ───────────────────────────────────────────────────────
+# ── Single-attempt render (fresh browser/context/page every call) ─────────────
 
-def _render_pdf(url: str, timeout: int = 60_000) -> bytes:
+def _one_attempt(url: str, attempt: int, timeout: int) -> bytes:
     """
-    Open url in a realistic desktop-Chrome context, call page.pdf().
-
-    No paywall detection.  No content filtering.
-    Returns raw PDF bytes.  Raises on any Playwright error.
+    One full render attempt with a brand-new browser context.
+    Raises on any failure so the caller can retry with a fresh session.
     """
-    print(f"  [pw] launching chromium", flush=True)
+    print(f"  [pw] attempt {attempt} — launching chromium", flush=True)
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True, args=_LAUNCH_ARGS)
-        print(f"  [pw] browser launched  version={browser.version}", flush=True)
+        print(f"  [pw] attempt {attempt} — browser {browser.version}", flush=True)
 
-        # Fresh context with full desktop-Chrome fingerprint
         context = browser.new_context(**_CONTEXT_OPTS)
         context.add_init_script(_INIT_SCRIPT)
         page = context.new_page()
 
         try:
-            # Short human-like pause before navigation
-            page.wait_for_timeout(400)
+            # ── Randomized pre-navigation wait (human pacing) ──────────────
+            pre_nav_ms = random.randint(1_500, 4_500)
+            print(f"  [pw] attempt {attempt} — pre-nav wait {pre_nav_ms} ms",
+                  flush=True)
+            page.wait_for_timeout(pre_nav_ms)
 
-            # ── Pre-navigation: full-height viewport for long articles ──────
+            # ── Full-height viewport for long articles ─────────────────────
             page.set_viewport_size({"width": 1400, "height": 2200})
-            print(f"  [pw] viewport set 1400x2200", flush=True)
 
-            # ── Step 1: navigate ───────────────────────────────────────────
-            print(f"  [pw] goto {url!r}  timeout={timeout}", flush=True)
+            # ── Navigate ───────────────────────────────────────────────────
+            print(f"  [pw] attempt {attempt} — goto {url!r}", flush=True)
             try:
                 nav = page.goto(url, wait_until="networkidle", timeout=timeout)
-                print(f"  [pw] networkidle  http={nav.status if nav else '?'}", flush=True)
+                print(f"  [pw] attempt {attempt} — networkidle "
+                      f"http={nav.status if nav else '?'}", flush=True)
             except Exception as e:
-                print(f"  [pw] networkidle failed ({e}) — retrying domcontentloaded",
+                print(f"  [pw] attempt {attempt} — networkidle failed "
+                      f"({e.__class__.__name__}) — retrying domcontentloaded",
                       flush=True)
                 nav = page.goto(url, wait_until="domcontentloaded", timeout=timeout)
-                print(f"  [pw] domcontentloaded  http={nav.status if nav else '?'}",
-                      flush=True)
+                print(f"  [pw] attempt {attempt} — domcontentloaded "
+                      f"http={nav.status if nav else '?'}", flush=True)
 
-            # ── Step 2: interstitial / redirect guard ──────────────────────
+            # ── Interstitial detection + guard ─────────────────────────────
+            try:
+                body_lower = page.inner_text("body", timeout=5_000).lower()
+                interstitial_hit = any(p in body_lower for p in _INTERSTITIAL_PHRASES)
+            except Exception:
+                interstitial_hit = False
+
+            print(f"  [pw] attempt {attempt} — interstitial="
+                  f"{'YES — waiting' if interstitial_hit else 'no'}  "
+                  f"url={page.url!r}", flush=True)
+
             _wait_past_interstitial(page)
 
-            # ── Step 3: hard article validation (attempt 1) ────────────────
-            print(f"  [pw] validating article content (attempt 1) …", flush=True)
+            if interstitial_hit:
+                print(f"  [pw] attempt {attempt} — post-interstitial "
+                      f"url={page.url!r}", flush=True)
+
+            # ── Hard article validation ────────────────────────────────────
             article_ok = _wait_for_article(page, timeout_ms=12_000)
+            print(f"  [pw] attempt {attempt} — selectors="
+                  f"{'FOUND' if article_ok else 'NOT FOUND'}  "
+                  f"final_url={page.url!r}", flush=True)
 
-            # ── Step 4: retry if article not found ─────────────────────────
-            if not article_ok:
-                print(f"  [pw] article not found — retrying full navigation …",
-                      flush=True)
-                try:
-                    page.wait_for_timeout(1_500)
-                    nav2 = page.goto(url, wait_until="domcontentloaded",
-                                     timeout=timeout)
-                    print(f"  [pw] retry http={nav2.status if nav2 else '?'}",
-                          flush=True)
-                    _wait_past_interstitial(page)
-                    article_ok = _wait_for_article(page, timeout_ms=15_000)
-                except Exception as exc:
-                    print(f"  [pw] retry navigation failed: {exc}", flush=True)
-
-            # ── Step 5: refuse to print interstitial page ──────────────────
             if not article_ok:
                 raise ValueError(
-                    f"Article content not found after retry for {url!r} — "
-                    "interstitial not cleared. PMID will be skipped."
+                    f"attempt {attempt}: article selectors not found  "
+                    f"url={page.url!r}"
                 )
 
-            # ── Step 6: inject full-width CSS + mandatory 3 s settle ──────
-            print(f"  [pw] injecting print layout CSS …", flush=True)
+            # ── Inject full-width print CSS ────────────────────────────────
             page.add_style_tag(content="""
 html, body {
     width: 100% !important;
@@ -319,21 +321,52 @@ main, article, .article-page {
     max-width: 100% !important;
 }
 """)
-            print(f"  [pw] article validated — settling 3 s …", flush=True)
-            page.wait_for_timeout(3_000)
 
-            # ── Step 7: print to PDF ───────────────────────────────────────
-            print(f"  [pw] calling page.pdf() …", flush=True)
+            # ── Randomized pre-pdf settle ──────────────────────────────────
+            pre_pdf_ms = random.randint(2_500, 6_000)
+            print(f"  [pw] attempt {attempt} — pre-pdf settle {pre_pdf_ms} ms",
+                  flush=True)
+            page.wait_for_timeout(pre_pdf_ms)
+
+            # ── Print ──────────────────────────────────────────────────────
+            print(f"  [pw] attempt {attempt} — calling page.pdf() …", flush=True)
             pdf = page.pdf(**_PDF_OPTS)
             valid = pdf[:4] == b"%PDF" if pdf else False
-            print(f"  [pw] pdf() → {len(pdf):,} bytes  valid={valid}", flush=True)
+            print(f"  [pw] attempt {attempt} — pdf() → {len(pdf):,} bytes  "
+                  f"valid={valid}  url={page.url!r}", flush=True)
             return pdf
 
         finally:
             page.close()
             context.close()
             browser.close()
-            print(f"  [pw] browser closed", flush=True)
+            print(f"  [pw] attempt {attempt} — browser closed", flush=True)
+
+
+# ── Core render function — up to 3 attempts with fresh context each time ──────
+
+def _render_pdf(url: str, timeout: int = 60_000) -> bytes:
+    """
+    Try up to 3 times (attempt 1 + 2 retries).
+    Each retry uses a completely fresh browser/context/page and cookies.
+    Randomised backoff between retries to reduce request burst behaviour.
+    """
+    max_attempts = 3
+    last_exc: Exception = RuntimeError("no attempts made")
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return _one_attempt(url, attempt, timeout)
+        except Exception as exc:
+            last_exc = exc
+            print(f"  [pw] attempt {attempt} FAILED: {exc}", flush=True)
+            if attempt < max_attempts:
+                backoff_s = random.uniform(3.0, 7.0)
+                print(f"  [pw] backing off {backoff_s:.1f} s before "
+                      f"attempt {attempt + 1} …", flush=True)
+                time.sleep(backoff_s)
+
+    raise last_exc
 
 
 # ── Flask app ──────────────────────────────────────────────────────────────────
