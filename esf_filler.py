@@ -26,6 +26,45 @@ from pypdf import PdfReader, PdfWriter
 from reportlab.lib.colors import black
 from reportlab.pdfgen import canvas as rl_canvas
 
+
+def _prepare_sig_image(sig_path: Path) -> io.BytesIO:
+    """
+    Return a BytesIO PNG with proper RGBA transparency so reportlab can
+    composite the signature cleanly with mask='auto'.
+
+    • If the source PNG already has an alpha channel → kept as-is.
+    • If it has a solid white/near-white background → convert to RGBA and
+      set near-white pixels (R>240, G>240, B>240) to fully transparent.
+
+    Uses Pillow (installed as a transitive dependency of pdfplumber).
+    Falls back to a raw file-copy if Pillow is unavailable.
+    """
+    try:
+        from PIL import Image as _PILImage
+        img = _PILImage.open(str(sig_path))
+        if img.mode == "RGBA":
+            # Already has a real alpha channel — use directly
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            buf.seek(0)
+            return buf
+        img = img.convert("RGBA")
+        pixels = list(img.getdata())
+        new_pixels = [
+            (r, g, b, 0) if (r > 240 and g > 240 and b > 240) else (r, g, b, a)
+            for (r, g, b, a) in pixels
+        ]
+        img.putdata(new_pixels)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        return buf
+    except Exception:
+        # Pillow unavailable or image unreadable — return raw bytes
+        buf = io.BytesIO(sig_path.read_bytes())
+        buf.seek(0)
+        return buf
+
 # ── Typography constants ──────────────────────────────────────────────────
 _F          = "Helvetica"
 _FB         = "Helvetica-Bold"
@@ -33,8 +72,8 @@ _FSML       = 8
 _FREG       = 9
 _FHDR       = 8
 _LH         = 13
-_MARK_FONT  = 14       # point size for the "X" mark glyph
-_CHECKBOX_OFFSET = 11  # points left of "OTHER" text where the checkbox sits
+_MARK_FONT  = 8        # point size for the "X" mark glyph (must fit inside checkbox)
+_CHECKBOX_OFFSET = 9   # points left of "OTHER" text where the checkbox sits
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -156,8 +195,13 @@ def _build_condition_overlay(
             xt, yt = anchors["x_text"], anchors["y_text"]
 
             # ── X mark ─────────────────────────────────────────────
+            # Center the glyph inside the checkbox square.
+            # drawString places the bottom-left of the character at (x, y).
+            # Cap-height of Helvetica-Bold ≈ 72% of font size.
+            # Horizontal: shift +2 pt so the X sits in the middle of the ~10 pt box.
             c.setFont(_FB, _MARK_FONT)
-            c.drawString(xm, ym - _MARK_FONT / 2 + 1, "X")
+            cap_h  = _MARK_FONT * 0.72
+            c.drawString(xm + 2, ym - cap_h / 2, "X")
 
             # ── Condition text ──────────────────────────────────────
             label = f"{condition} Research Document Attached"
@@ -691,19 +735,23 @@ def _find_sig_anchors(page, ph: float) -> dict | None:
 
     sig_top  = float(sig_w["top"])
     sig_left = float(sig_w.get("x0", 72))
-    # Place image/text in the BLANK FIELD AREA — 18 pts below the label row
-    sig_y    = _rl_y(sig_top + 18, ph)
-    sig_x    = sig_left + 2
+    sig_right = float(sig_w.get("x1", sig_left + 60))
+    # Place the signature image to the RIGHT of the label text, inside the
+    # blank field box.  Use a comfortable gap (12 pt) after the label's right
+    # edge, then shift down 8 pt from the label's top so it sits in the field.
+    sig_x    = sig_right + 12
+    sig_y    = _rl_y(sig_top + 8, ph)
 
     if date_w:
         date_top  = float(date_w["top"])
         date_left = float(date_w.get("x0", 350))
-        date_y    = _rl_y(date_top + 18, ph)
-        # Place date to the RIGHT of the label, not overlapping it
-        date_x    = date_left + float(date_w.get("width", 50)) + 6
+        # Write the date AT the field position (overlays the MM-DD-YYYY hint).
+        # Baseline is centred in the label's bounding box height.
+        date_x    = date_left
+        date_y    = _rl_y(date_top + float(date_w.get("height", 10)) * 0.5 + 4, ph)
     else:
         date_y = sig_y
-        date_x = sig_x + 240
+        date_x = sig_x + 200
 
     return {"sig_x": sig_x, "sig_y": sig_y, "date_x": date_x, "date_y": date_y}
 
@@ -725,31 +773,20 @@ def _build_sig_overlay(
         c.setPageSize((pw, ph))
         if i == page_idx:
             # ── Signature image ──────────────────────────────────
+            # _prepare_sig_image() normalises the PNG to RGBA, converting any
+            # solid-white background to transparent pixels. mask='auto' then
+            # reads the alpha channel directly — no black rectangle artifact.
             try:
-                # mask=[240,255, 240,255, 240,255] treats near-white pixels as
-                # transparent, removing solid white backgrounds while preserving
-                # dark ink strokes. Falls back to alpha-channel mask if drawImage
-                # rejects the color range (e.g. CMYK or palette-mode images).
-                try:
-                    c.drawImage(
-                        ImageReader(str(sig_path)),
-                        anchors["sig_x"],
-                        anchors["sig_y"],
-                        width  = 160,
-                        height = 40,
-                        preserveAspectRatio = True,
-                        mask = [240, 255, 240, 255, 240, 255],
-                    )
-                except Exception:
-                    c.drawImage(
-                        ImageReader(str(sig_path)),
-                        anchors["sig_x"],
-                        anchors["sig_y"],
-                        width  = 160,
-                        height = 40,
-                        preserveAspectRatio = True,
-                        mask = "auto",
-                    )
+                sig_buf = _prepare_sig_image(sig_path)
+                c.drawImage(
+                    ImageReader(sig_buf),
+                    anchors["sig_x"],
+                    anchors["sig_y"],
+                    width  = 130,
+                    height = 32,
+                    preserveAspectRatio = True,
+                    mask = "auto",
+                )
             except Exception as exc:
                 print(f"  [sig-warn] Cannot draw signature image: {exc}")
 

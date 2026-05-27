@@ -134,4 +134,8 @@ if __name__ == "__main__":
     with _lock:
         _get_browser()
 
-    app.run(host="0.0.0.0", port=port, threaded=True)
+    # threaded=False: all requests run in the same (main) thread where the
+    # Playwright browser was launched.  With threaded=True Flask spawns a new
+    # thread per request and Playwright's sync API (which uses greenlets
+    # internally) raises "Cannot switch to a different thread".
+    app.run(host="0.0.0.0", port=port, threaded=False)
