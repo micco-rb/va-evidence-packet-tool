@@ -1,0 +1,12 @@
+# Nixpacks build config for Railway deployment
+# Installs Python deps + Playwright Chromium binaries during the build phase
+# so they are baked into the container image and available at runtime.
+
+[phases.install]
+cmds = [
+  "pip install -r requirements.txt",
+  "playwright install chromium --with-deps"
+]
+
+[start]
+cmd = "python app.py"
