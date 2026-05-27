@@ -1,12 +1,16 @@
-# Nixpacks build config for Railway deployment
-# Installs Python deps + Playwright Chromium binaries during the build phase
-# so they are baked into the container image and available at runtime.
+# Nixpacks build config for Railway.
+#
+# DO NOT override [phases.install] — that replaces Nixpacks' own pip setup
+# and runs before Python is on PATH, causing "pip: command not found".
+#
+# Correct sequence Nixpacks uses automatically:
+#   setup   → installs Python via Nix
+#   install → pip install -r requirements.txt   (auto-detected)
+#   build   → playwright install chromium       (our custom step, runs after pip)
+#   start   → python app.py
 
-[phases.install]
-cmds = [
-  "pip install -r requirements.txt",
-  "playwright install chromium --with-deps"
-]
+[phases.build]
+cmds = ["playwright install chromium --with-deps"]
 
 [start]
 cmd = "python app.py"
