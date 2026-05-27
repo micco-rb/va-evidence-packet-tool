@@ -6,18 +6,15 @@ Endpoints:
   POST /render         → JSON {"url": "..."} → PDF bytes (application/pdf)
   POST /render-batch   → JSON {"urls": [...]} → JSON {"results": [...]}
 
-Thread-safety model:
-  Each request (including each worker inside /render-batch) creates its OWN
-  `with sync_playwright() as pw:` context and launches its own browser.
-  sync_playwright() is NOT thread-safe when shared — the singleton approach
-  introduced in a previous refactor caused all renders to fail silently.
-  Per-request browsers are the correct model for threaded Flask.
+Thread-safety: each request owns its own sync_playwright() + browser.
+NCBI stealth: richer navigator patches, google referer, reload-retry.
 """
 
 import base64
 import random
 import re
 import sys
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -28,11 +25,10 @@ try:
     from playwright.sync_api import sync_playwright
 except ImportError:
     print("ERROR: playwright not installed.")
-    print("Run:  pip install playwright && playwright install chromium")
     sys.exit(1)
 
 
-# ── Chromium launch args ───────────────────────────────────────────────────────
+# ── Launch args ────────────────────────────────────────────────────────────────
 _LAUNCH_ARGS = [
     "--no-sandbox",
     "--disable-setuid-sandbox",
@@ -48,18 +44,28 @@ _LAUNCH_ARGS = [
     "--hide-scrollbars",
     "--no-first-run",
     "--disable-popup-blocking",
+    # Extra flags that reduce headless fingerprinting
+    "--disable-blink-features=AutomationControlled",
+    "--disable-features=IsolateOrigins,site-per-process",
 ]
 
-# ── Realistic desktop-Chrome fingerprint ─────────────────────────────────────
-_UA = (
+# ── User agents ────────────────────────────────────────────────────────────────
+_UA_GENERIC = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+# NCBI checks UA carefully — use a slightly newer version
+_UA_NCBI = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36"
+)
 
-_CONTEXT_OPTS = dict(
-    user_agent  = _UA,
-    viewport    = {"width": 1365, "height": 900},
+# ── Generic context options ────────────────────────────────────────────────────
+_CONTEXT_OPTS_GENERIC = dict(
+    user_agent  = _UA_GENERIC,
+    viewport    = {"width": 1366, "height": 768},
     locale      = "en-US",
     timezone_id = "America/Chicago",
     extra_http_headers = {
@@ -70,26 +76,121 @@ _CONTEXT_OPTS = dict(
         ),
         "Accept-Language":           "en-US,en;q=0.9",
         "Upgrade-Insecure-Requests": "1",
-        "sec-ch-ua":                 '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-        "sec-ch-ua-mobile":          "?0",
-        "sec-ch-ua-platform":        '"Windows"',
-        "sec-fetch-dest":            "document",
-        "sec-fetch-mode":            "navigate",
-        "sec-fetch-site":            "none",
-        "sec-fetch-user":            "?1",
+        "sec-ch-ua":      '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "sec-ch-ua-mobile":   "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest":  "document",
+        "sec-fetch-mode":  "navigate",
+        "sec-fetch-site":  "none",
+        "sec-fetch-user":  "?1",
     },
 )
 
-_INIT_SCRIPT = """
+# ── NCBI-specific context options ──────────────────────────────────────────────
+# Adds a Google referer (simulates arriving from a search) and tighter headers.
+_CONTEXT_OPTS_NCBI = dict(
+    user_agent  = _UA_NCBI,
+    viewport    = {"width": 1366, "height": 768},
+    locale      = "en-US",
+    timezone_id = "America/New_York",
+    extra_http_headers = {
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;"
+            "q=0.9,image/avif,image/webp,image/apng,*/*;"
+            "q=0.8,application/signed-exchange;v=b3;q=0.7"
+        ),
+        "Accept-Language":           "en-US,en;q=0.9",
+        "Upgrade-Insecure-Requests": "1",
+        "DNT":                       "1",
+        "Referer":                   "https://www.google.com/",
+        "sec-ch-ua":      '"Chromium";v="125", "Google Chrome";v="125", "Not-A.Brand";v="99"',
+        "sec-ch-ua-mobile":   "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest":  "document",
+        "sec-fetch-mode":  "navigate",
+        "sec-fetch-site":  "cross-site",
+        "sec-fetch-user":  "?1",
+    },
+)
+
+# ── Standard stealth init script ───────────────────────────────────────────────
+_INIT_SCRIPT_BASE = """
+    // 1. Primary bot signal
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+    // 2. Realistic plugins array
     Object.defineProperty(navigator, 'plugins', {
-        get: () => Object.assign([1,2,3,4,5], { item: (i) => i }),
+        get: () => {
+            const p = [
+                { name:'Chrome PDF Plugin',  filename:'internal-pdf-viewer',
+                  description:'Portable Document Format' },
+                { name:'Chrome PDF Viewer',  filename:'mhjfbmdgcfjbbpaeojofohoefgiehjai',
+                  description:'' },
+                { name:'Native Client',      filename:'internal-nacl-plugin',
+                  description:'' },
+            ];
+            p.item       = (i) => p[i];
+            p.namedItem  = (n) => p.find(x => x.name === n) || null;
+            p.refresh    = () => {};
+            return p;
+        }
     });
+
+    // 3. Languages
     Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-    const _cdcKeys = Object.keys(window).filter(k => k.startsWith('cdc_'));
-    _cdcKeys.forEach(k => { try { delete window[k]; } catch(_) {} });
+
+    // 4. Hardware signals (realistic desktop values)
+    Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+    Object.defineProperty(navigator, 'deviceMemory',        { get: () => 8 });
+    Object.defineProperty(navigator, 'maxTouchPoints',      { get: () => 0 });
+
+    // 5. chrome object that real Chrome exposes
+    window.chrome = {
+        app: {
+            isInstalled: false,
+            InstallState: { DISABLED:'disabled', INSTALLED:'installed',
+                            NOT_INSTALLED:'not_installed' },
+            RunningState: { CANNOT_RUN:'cannot_run', READY_TO_RUN:'ready_to_run',
+                            RUNNING:'running' }
+        },
+        runtime: { id: undefined }
+    };
+
+    // 6. Permissions API — prevent notifications check from leaking headless
+    if (navigator.permissions && navigator.permissions.query) {
+        const _origQuery = navigator.permissions.query.bind(navigator.permissions);
+        navigator.permissions.query = (p) => {
+            if (p && p.name === 'notifications') {
+                return Promise.resolve({ state: 'default', onchange: null });
+            }
+            return _origQuery(p);
+        };
+    }
+
+    // 7. Remove CDP / DevTools automation globals
+    Object.keys(window).filter(k => k.startsWith('cdc_'))
+          .forEach(k => { try { delete window[k]; } catch(_) {} });
 """
 
+# ── NCBI-specific additional patches ──────────────────────────────────────────
+_INIT_SCRIPT_NCBI_EXTRA = """
+    // NCBI checks screen colour depth and window.outerWidth/Height
+    Object.defineProperty(screen, 'colorDepth',   { get: () => 24 });
+    Object.defineProperty(screen, 'pixelDepth',   { get: () => 24 });
+    Object.defineProperty(window, 'outerWidth',   { get: () => 1366 });
+    Object.defineProperty(window, 'outerHeight',  { get: () => 768 });
+    Object.defineProperty(window, 'innerWidth',   { get: () => 1366 });
+    Object.defineProperty(window, 'innerHeight',  { get: () => 768 });
+
+    // Ensure no automation-related globals leak
+    delete window.__playwright;
+    delete window.__pw_manual;
+"""
+
+_INIT_SCRIPT_GENERIC = _INIT_SCRIPT_BASE
+_INIT_SCRIPT_NCBI    = _INIT_SCRIPT_BASE + _INIT_SCRIPT_NCBI_EXTRA
+
+# ── PDF options ────────────────────────────────────────────────────────────────
 _PDF_OPTS = dict(
     format               = "Letter",
     print_background     = True,
@@ -108,29 +209,50 @@ _INTERSTITIAL_PHRASES = [
     "verifying you are human", "just a moment", "please wait",
     "ddos protection", "ray id", "enable javascript", "browser verification",
 ]
-_ARTICLE_SELECTORS = [
-    "#article-details", ".abstract-content", "#abstract",
-    ".article-page", ".full-view", "article", ".article",
-    ".content-main", "main",
+
+# NCBI-specific article selectors (checked first, then generic)
+_NCBI_ARTICLE_SELECTORS = [
+    "#article-details",
+    ".abstract-content",
+    "#abstract",
+    ".full-text",
+    ".article-details",
+    "#full-view-heading",
+    ".pmc-article",
+    "#mc-main-content",
 ]
-_ACCEPT_SELECTORS = [
-    "#article-details", "main", "article",
-    ".heading-title", ".abstract-content", "#abstract",
+_GENERIC_ARTICLE_SELECTORS = [
+    "article", ".article-page", ".full-view",
+    ".article", ".content-main", "main",
 ]
-_ACCEPT_TEXT_PHRASES = ["abstract", "pubmed"]
-_BLOCK_PHRASES       = [
-    "checking your browser", "cf-browser-verification",
-    "access denied", "403 forbidden",
-]
+_ALL_ARTICLE_SELECTORS = _NCBI_ARTICLE_SELECTORS + _GENERIC_ARTICLE_SELECTORS
+
+_ACCEPT_SELECTORS    = ["#article-details", "main", "article",
+                        ".heading-title", ".abstract-content", "#abstract",
+                        "#full-view-heading"]
+_ACCEPT_TEXT_PHRASES = ["abstract", "pubmed", "ncbi", "doi"]
+_BLOCK_PHRASES       = ["checking your browser", "cf-browser-verification",
+                        "access denied", "403 forbidden"]
 
 _MAX_CONCURRENT = 3
 
+
+# ── URL classifiers ────────────────────────────────────────────────────────────
+
+def _is_ncbi(url: str) -> bool:
+    return any(h in url for h in (
+        "pubmed.ncbi.nlm.nih.gov",
+        "pmc.ncbi.nlm.nih.gov",
+        "ncbi.nlm.nih.gov",
+    ))
 
 def _is_pmc(url: str) -> bool:
     return "pmc.ncbi.nlm.nih.gov" in url or "/pmc/articles/" in url
 
 
-def _validate_article_page(page, body_lower: str = "") -> tuple[bool, str]:
+# ── Page helpers ───────────────────────────────────────────────────────────────
+
+def _validate_page(page, body_lower: str = "") -> tuple[bool, str]:
     if not body_lower:
         try:
             body_lower = page.inner_text("body", timeout=5_000).lower()
@@ -159,16 +281,17 @@ _INTERSTITIAL_CLEAR_JS = """
 """
 
 
-def _wait_for_article(page, prefix: str, timeout_ms: int = 10_000) -> bool:
-    per_ms = max(1_000, timeout_ms // len(_ARTICLE_SELECTORS))
-    for sel in _ARTICLE_SELECTORS:
+def _wait_for_article(page, prefix: str, selectors: list,
+                       timeout_ms: int = 12_000) -> bool:
+    per_ms = max(1_200, timeout_ms // len(selectors))
+    for sel in selectors:
         try:
             page.wait_for_selector(sel, state="visible", timeout=per_ms)
-            print(f"{prefix} [selector-visible] {sel!r}", flush=True)
+            print(f"{prefix} [article-visible] {sel!r}", flush=True)
             return True
         except Exception:
             continue
-    print(f"{prefix} [selector-visible] none matched", flush=True)
+    print(f"{prefix} [article-visible] none matched", flush=True)
     return False
 
 
@@ -179,7 +302,6 @@ def _wait_past_interstitial(page, prefix: str, timeout_ms: int = 35_000) -> None
         return
     found = [p for p in _INTERSTITIAL_PHRASES if p in body]
     if not found:
-        _wait_for_article(page, prefix, timeout_ms=8_000)
         return
     print(f"{prefix} [interstitial] detected: {found}", flush=True)
     try:
@@ -190,28 +312,48 @@ def _wait_past_interstitial(page, prefix: str, timeout_ms: int = 35_000) -> None
         print(f"{prefix} [interstitial] cleared", flush=True)
     except Exception as exc:
         err = str(exc).lower()
-        if any(k in err for k in ("navigat", "detach", "target closed", "execution context")):
-            print(f"{prefix} [interstitial] redirect fired — waiting for new page", flush=True)
+        if any(k in err for k in ("navigat", "detach", "target closed",
+                                   "execution context")):
+            print(f"{prefix} [interstitial] redirect fired", flush=True)
         else:
             print(f"{prefix} [interstitial] timeout — proceeding", flush=True)
     try:
         page.wait_for_load_state("networkidle", timeout=20_000)
     except Exception:
         pass
-    _wait_for_article(page, prefix, timeout_ms=10_000)
-    page.wait_for_timeout(800)
 
 
-# ── Single-attempt render — owns its own playwright + browser ─────────────────
+def _save_debug_screenshot(page, url: str, label: str) -> None:
+    """Save a screenshot + HTML to debug/ for post-mortem inspection."""
+    try:
+        m    = re.search(r"/(\d+)/?$", url)
+        slug = m.group(1) if m else re.sub(r"[^a-z0-9]", "_", url.lower())[:40]
+        dbg  = Path(f"debug/{slug}/{label}")
+        dbg.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(dbg / "screenshot.png"), full_page=True)
+        (dbg / "page.html").write_text(page.content(), encoding="utf-8")
+        print(f"  [debug] artifacts → {dbg}/", flush=True)
+    except Exception as e:
+        print(f"  [debug] screenshot failed: {e}", flush=True)
+
+
+# ── Single-attempt render ──────────────────────────────────────────────────────
 
 def _one_attempt(url: str, attempt: int, timeout: int) -> bytes:
     """
-    One full render attempt.  Creates a fresh sync_playwright() context,
-    browser, page — all owned by the calling thread.  Thread-safe.
+    Full render attempt in an isolated playwright/browser/context/page.
+    NCBI URLs get stronger stealth context and a reload-retry pass.
     """
+    ncbi   = _is_ncbi(url)
     pmc    = _is_pmc(url)
-    prefix = f"  [pw a{attempt}]"
-    print(f"{prefix} START  url={url!r}  pmc={pmc}", flush=True)
+    prefix = f"  [pw a{attempt}{'N' if ncbi else ''}]"
+
+    ctx_opts    = _CONTEXT_OPTS_NCBI    if ncbi else _CONTEXT_OPTS_GENERIC
+    init_script = _INIT_SCRIPT_NCBI     if ncbi else _INIT_SCRIPT_GENERIC
+    selectors   = (_NCBI_ARTICLE_SELECTORS if ncbi
+                   else _ALL_ARTICLE_SELECTORS)
+
+    print(f"{prefix} START  ncbi={ncbi} pmc={pmc}  url={url!r}", flush=True)
 
     with sync_playwright() as pw:
         print(f"{prefix} playwright started", flush=True)
@@ -219,76 +361,89 @@ def _one_attempt(url: str, attempt: int, timeout: int) -> bytes:
         browser = pw.chromium.launch(headless=True, args=_LAUNCH_ARGS)
         print(f"{prefix} browser launched  ver={browser.version}", flush=True)
 
-        context = browser.new_context(**_CONTEXT_OPTS)
-        context.add_init_script(_INIT_SCRIPT)
-        print(f"{prefix} context created", flush=True)
+        context = browser.new_context(**ctx_opts)
+        context.add_init_script(init_script)
+        print(f"{prefix} context created (ncbi={ncbi})", flush=True)
 
         page = context.new_page()
-        page.set_viewport_size({"width": 1400, "height": 2200})
+        page.set_viewport_size({"width": 1366, "height": 768})
         print(f"{prefix} page created", flush=True)
 
         try:
-            # ── Pre-nav human pacing (skip for PMC) ───────────────
-            if not pmc:
-                pre_ms = random.randint(300, 800)
-                page.wait_for_timeout(pre_ms)
+            # ── Pre-nav pacing ────────────────────────────────────
+            if ncbi:
+                # Brief realistic pause before hitting NCBI
+                pre_ms = random.randint(800, 1_500)
+            else:
+                pre_ms = random.randint(200, 600)
+            page.wait_for_timeout(pre_ms)
 
             # ── Navigate ──────────────────────────────────────────
-            nav_timeout = int(timeout * 0.6)
+            nav_timeout = int(timeout * 0.55)
             print(f"{prefix} goto {url!r}", flush=True)
             try:
                 nav = page.goto(url, wait_until="domcontentloaded",
                                 timeout=nav_timeout)
                 status = nav.status if nav else "?"
-                print(f"{prefix} goto complete  http={status}", flush=True)
+                print(f"{prefix} goto complete  http={status}  "
+                      f"url={page.url!r}", flush=True)
             except Exception as e:
                 print(f"{prefix} goto FAILED: {e.__class__.__name__}: {e}",
                       flush=True)
                 raise
 
             # ── Wait for content ──────────────────────────────────
-            if pmc:
-                print(f"{prefix} PMC fast-path — waiting for article selector",
-                      flush=True)
-                _wait_for_article(page, prefix, timeout_ms=10_000)
-            else:
-                _wait_past_interstitial(page, prefix)
+            if ncbi:
+                # Wait for interstitial to clear, then article selectors
+                _wait_past_interstitial(page, prefix, timeout_ms=30_000)
+                found = _wait_for_article(page, prefix, selectors,
+                                          timeout_ms=15_000)
+                print(f"{prefix} article selector found={found}", flush=True)
 
-            # ── Validate page ─────────────────────────────────────
+                # ── NCBI reload-retry if first content check failed ──
+                if not found:
+                    print(f"{prefix} [ncbi-reload] no selector — "
+                          f"saving screenshot and reloading", flush=True)
+                    _save_debug_screenshot(page, url, f"a{attempt}_before_reload")
+                    try:
+                        page.reload(wait_until="domcontentloaded",
+                                    timeout=nav_timeout)
+                        print(f"{prefix} [ncbi-reload] reloaded  "
+                              f"url={page.url!r}", flush=True)
+                        _wait_for_article(page, prefix, selectors,
+                                          timeout_ms=15_000)
+                    except Exception as re_exc:
+                        print(f"{prefix} [ncbi-reload] reload failed: {re_exc}",
+                              flush=True)
+            else:
+                # Generic: handle interstitial then wait for article
+                _wait_past_interstitial(page, prefix)
+                _wait_for_article(page, prefix, selectors, timeout_ms=10_000)
+
+            # ── Validate ──────────────────────────────────────────
             print(f"{prefix} validating page  url={page.url!r}", flush=True)
             try:
                 body_lower = page.inner_text("body", timeout=5_000).lower()
             except Exception:
                 body_lower = ""
 
-            article_ok, val_reason = _validate_article_page(page, body_lower)
-            print(f"{prefix} validation  ok={article_ok}  reason={val_reason!r}",
-                  flush=True)
+            ok, reason = _validate_page(page, body_lower)
+            print(f"{prefix} validation  ok={ok}  reason={reason!r}", flush=True)
 
-            if not article_ok:
-                m    = re.search(r"/(\d+)/?$", url)
-                pmid = m.group(1) if m else "unknown"
-                try:
-                    dbg = Path(f"debug/{pmid}/attempt_{attempt}")
-                    dbg.mkdir(parents=True, exist_ok=True)
-                    page.screenshot(path=str(dbg / "screenshot.png"), full_page=True)
-                    (dbg / "page.html").write_text(page.content(), encoding="utf-8")
-                    print(f"{prefix} debug artifacts → {dbg}/", flush=True)
-                except Exception as dbg_exc:
-                    print(f"{prefix} artifact save failed: {dbg_exc}", flush=True)
-                raise ValueError(
-                    f"page rejected — {val_reason}  url={page.url!r}"
-                )
+            if not ok:
+                _save_debug_screenshot(page, url, f"a{attempt}_rejected")
+                raise ValueError(f"page rejected — {reason}  url={page.url!r}")
 
-            # ── Inject full-width print CSS ───────────────────────
+            # ── Print CSS ─────────────────────────────────────────
             page.add_style_tag(content="""
 html, body { width:100% !important; margin:0 !important;
              padding:0 !important; overflow-x:hidden !important; }
-main, article, .article-page { max-width:100% !important; }
+main, article, .article-page, #article-details,
+.abstract-content { max-width:100% !important; }
 """)
 
             # ── Pre-PDF settle ────────────────────────────────────
-            settle_ms = 800 if pmc else random.randint(1_000, 1_500)
+            settle_ms = random.randint(1_000, 1_800) if ncbi else random.randint(800, 1_300)
             print(f"{prefix} pre-pdf settle {settle_ms} ms", flush=True)
             page.wait_for_timeout(settle_ms)
 
@@ -300,7 +455,8 @@ main, article, .article-page { max-width:100% !important; }
                   flush=True)
 
             if not valid:
-                raise ValueError(f"page.pdf() returned {len(pdf)} bytes — not a valid PDF")
+                raise ValueError(
+                    f"page.pdf() returned {len(pdf)} bytes — not a valid PDF")
 
             print(f"{prefix} SUCCESS", flush=True)
             return pdf
@@ -311,24 +467,18 @@ main, article, .article-page { max-width:100% !important; }
             raise
 
         finally:
-            try:
-                page.close()
-            except Exception:
-                pass
-            try:
-                context.close()
-            except Exception:
-                pass
-            try:
-                browser.close()
-            except Exception:
-                pass
-            print(f"{prefix} browser closed", flush=True)
+            for obj, name in ((page, "page"), (context, "context"),
+                               (browser, "browser")):
+                try:
+                    obj.close()
+                except Exception:
+                    pass
+            print(f"{prefix} closed all", flush=True)
 
 
 # ── Core render — up to 3 attempts ────────────────────────────────────────────
 
-def _render_pdf(url: str, timeout: int = 45_000) -> bytes:
+def _render_pdf(url: str, timeout: int = 50_000) -> bytes:
     last_exc: Exception = RuntimeError("no attempts made")
     for attempt in range(1, 4):
         try:
@@ -337,19 +487,19 @@ def _render_pdf(url: str, timeout: int = 45_000) -> bytes:
             last_exc = exc
             print(f"  [pw] attempt {attempt} FAILED: {exc}", flush=True)
             if attempt < 3:
-                backoff = random.uniform(2.0, 4.0)
-                print(f"  [pw] backoff {backoff:.1f}s", flush=True)
-                import time; time.sleep(backoff)
+                backoff = random.uniform(2.5, 5.0)
+                print(f"  [pw] backoff {backoff:.1f}s before attempt {attempt+1}",
+                      flush=True)
+                time.sleep(backoff)
     raise last_exc
 
 
-# ── Flask app ──────────────────────────────────────────────────────────────────
+# ── Flask ──────────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 
 
 @app.get("/health")
 def health():
-    """Liveness probe — launches a throw-away browser to confirm Chromium works."""
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True, args=_LAUNCH_ARGS)
@@ -357,12 +507,11 @@ def health():
             browser.close()
     except Exception as exc:
         return jsonify(ok=False, error=str(exc)), 503
-    return jsonify(ok=True, service="renderer-worker", version="2.1", chromium=ver)
+    return jsonify(ok=True, service="renderer-worker", version="2.2", chromium=ver)
 
 
 @app.post("/render")
 def render():
-    """Single-URL render."""
     data = request.get_json(silent=True) or {}
     url  = (data.get("url") or "").strip()
     if not url:
@@ -382,23 +531,12 @@ def render():
         return jsonify(error=msg), 502
 
     print(f"[render] SUCCESS  {len(pdf_bytes):,} bytes  url={url!r}", flush=True)
-    return Response(
-        pdf_bytes,
-        mimetype = "application/pdf",
-        headers  = {"X-PDF-Size": str(len(pdf_bytes))},
-    )
+    return Response(pdf_bytes, mimetype="application/pdf",
+                    headers={"X-PDF-Size": str(len(pdf_bytes))})
 
 
 @app.post("/render-batch")
 def render_batch():
-    """
-    Render multiple URLs in parallel (≤_MAX_CONCURRENT at a time).
-    Each parallel worker owns its own playwright/browser — fully thread-safe.
-
-    Request:  {"urls": ["https://...", ...]}
-    Response: {"results": [{"url":..., "ok":true,  "pdf_b64":"..."},
-                            {"url":..., "ok":false, "error":"..."}]}
-    """
     data = request.get_json(silent=True) or {}
     urls = data.get("urls") or []
     if not urls:
@@ -413,13 +551,13 @@ def render_batch():
         print(f"  [batch] [{idx+1}/{len(urls)}] START  {url!r}", flush=True)
         try:
             pdf = _render_pdf(url)
-            print(f"  [batch] [{idx+1}/{len(urls)}] SUCCESS  {len(pdf):,} bytes  {url!r}",
-                  flush=True)
+            print(f"  [batch] [{idx+1}/{len(urls)}] SUCCESS  "
+                  f"{len(pdf):,} bytes  {url!r}", flush=True)
             return idx, {"url": url, "ok": True,
                          "pdf_b64": base64.b64encode(pdf).decode()}
         except Exception as exc:
-            print(f"  [batch] [{idx+1}/{len(urls)}] FAILED  {exc!r}  {url!r}",
-                  flush=True)
+            print(f"  [batch] [{idx+1}/{len(urls)}] FAILED  "
+                  f"{exc!r}  {url!r}", flush=True)
             return idx, {"url": url, "ok": False, "error": str(exc)}
 
     with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT) as pool:
@@ -436,6 +574,6 @@ def render_batch():
 
 if __name__ == "__main__":
     port = 7777
-    print(f"\n  Renderer Worker v2.1 — http://localhost:{port}")
-    print(f"  Thread model: per-request playwright (thread-safe)\n")
+    print(f"\n  Renderer Worker v2.2 — http://localhost:{port}")
+    print(f"  NCBI stealth: enhanced  Thread model: per-request\n")
     app.run(host="0.0.0.0", port=port, threaded=True)
