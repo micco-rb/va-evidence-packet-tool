@@ -623,8 +623,24 @@ def process(job_id: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Partial-rebuild helper  (retry / manual upload)
+# Partial-rebuild helpers  (retry / manual upload)
 # ─────────────────────────────────────────────────────────────────────────
+
+def _recalculate_dl_summary(job_id: str) -> None:
+    """
+    Recount dl_summary.downloaded / skipped from the live article_results list.
+    Called after any retry or manual-upload mutation so stat cards stay accurate.
+    """
+    with _lock:
+        if job_id not in jobs:
+            return
+        results    = jobs[job_id].get("article_results", [])
+        downloaded = sum(1 for a in results if a.get("downloaded"))
+        skipped    = len(results) - downloaded
+        ds = jobs[job_id].setdefault("dl_summary", {})
+        ds["downloaded"] = downloaded
+        ds["skipped"]    = skipped
+
 
 def _rebuild_packet(job_id: str, cond: str) -> str:
     """
@@ -713,12 +729,24 @@ def retry_article(job_id: str):
                         a["downloaded"]  = True
                         a["saved_paths"] = entry.get("saved_paths", [])
                         a["error"]       = ""
-        try:
-            _rebuild_packet(job_id, cond)
+
+        _recalculate_dl_summary(job_id)
+
+        pdf_count = len(_job(job_id).get("illness_files", {}).get(cond, []))
+        has_esf   = bool(_job(job_id).get("filled_esf_paths", {}).get(cond))
+
+        if has_esf:
+            try:
+                _rebuild_packet(job_id, cond)
+                return jsonify(ok=True, status="ok",
+                               packet_url=f"/final/{job_id}/{cond}",
+                               pdf_count=pdf_count)
+            except Exception as exc:
+                return jsonify(ok=False, error=str(exc)), 500
+        else:
             return jsonify(ok=True, status="ok",
-                           packet_url=f"/final/{job_id}/{cond}")
-        except Exception as exc:
-            return jsonify(ok=False, error=str(exc)), 500
+                           packet_url=None, pdf_count=pdf_count,
+                           has_esf=False)
     else:
         return jsonify(ok=False, status="failed",
                        error="Render failed — PMC may be blocking this IP")
@@ -763,14 +791,21 @@ def upload_article_pdf(job_id: str):
                         a["downloaded"] = True
                         a["error"]      = ""
 
-    try:
-        _rebuild_packet(job_id, cond)
-        # Return updated illness_files count for UI
-        updated_count = len(_job(job_id).get("illness_files", {}).get(cond, []))
-        return jsonify(ok=True, packet_url=f"/final/{job_id}/{cond}",
-                       pdf_count=updated_count)
-    except Exception as exc:
-        return jsonify(ok=False, error=str(exc)), 500
+    _recalculate_dl_summary(job_id)
+
+    pdf_count = len(_job(job_id).get("illness_files", {}).get(cond, []))
+    has_esf   = bool(_job(job_id).get("filled_esf_paths", {}).get(cond))
+
+    if has_esf:
+        try:
+            _rebuild_packet(job_id, cond)
+            return jsonify(ok=True, packet_url=f"/final/{job_id}/{cond}",
+                           pdf_count=pdf_count, has_esf=True)
+        except Exception as exc:
+            return jsonify(ok=False, error=str(exc)), 500
+    else:
+        # No ESF provided — PDF is saved to folder but no merged packet to rebuild
+        return jsonify(ok=True, packet_url=None, pdf_count=pdf_count, has_esf=False)
 
 
 # ── Status polling ────────────────────────────────────────────────────────

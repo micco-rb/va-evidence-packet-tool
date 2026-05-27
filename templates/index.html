@@ -1011,8 +1011,9 @@
                <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
                  <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
                </svg>Downloaded</span>`;
-          // Refresh packet download button for this condition
-          _refreshPacketCard(cond, data.packet_url);
+          // Refresh stat counters and packet card
+          _updateStatCounters();
+          _refreshPacketCard(cond, data.packet_url, data.pdf_count);
         } else {
           btn.disabled = false;
           btn.innerHTML = `<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>Retry`;
@@ -1096,7 +1097,8 @@
                  <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z"/>
                  <path fill-rule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm9.707 5.707a1 1 0 00-1.414-1.414L9 12.586l-1.293-1.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
                </svg>Uploaded Manually</span>`;
-          _refreshPacketCard(cond, data.packet_url);
+          _updateStatCounters();
+          _refreshPacketCard(cond, data.packet_url, data.pdf_count);
         } else {
           btn.disabled = false;
           btn.innerHTML = `<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>Upload PDF`;
@@ -1110,27 +1112,52 @@
       }
     }
 
-    // Update a specific packet card's download button and PDF count
-    function _refreshPacketCard(cond, packetUrl) {
+    // Update a specific packet card's download button, subtitle, and PDF count
+    function _refreshPacketCard(cond, packetUrl, pdfCount) {
       const grid = document.getElementById('packet-grid');
       const cards = grid.querySelectorAll('.packet-card');
       cards.forEach(card => {
         const h4 = card.querySelector('h4');
         if (h4 && h4.textContent.trim() === cond) {
-          // Replace or add download button
-          let dlBtn = card.querySelector('.btn-dl');
-          if (!dlBtn) {
-            dlBtn = document.createElement('button');
-            dlBtn.className = 'btn-dl';
-            card.appendChild(dlBtn);
+          // Update PDF count badge
+          if (pdfCount !== undefined) {
+            const badge = card.querySelector('.pdf-count');
+            if (badge) badge.textContent = `${pdfCount} PDF${pdfCount !== 1 ? 's' : ''}`;
+            const subtitle = card.querySelector('p.text-slate-500');
+            if (subtitle) subtitle.textContent =
+              `ESF + ${pdfCount} research PDF${pdfCount !== 1 ? 's' : ''} · headers on pages 3+`;
           }
-          dlBtn.innerHTML = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg> Download Packet`;
-          dlBtn.onclick = () => { window.location = packetUrl; };
           // Remove "no ESF" note if present
           const note = card.querySelector('p.italic');
           if (note) note.remove();
+          // Add/update download button only when we have a packet URL
+          if (packetUrl) {
+            let dlBtn = card.querySelector('.btn-dl');
+            if (!dlBtn) {
+              dlBtn = document.createElement('button');
+              dlBtn.className = 'btn-dl';
+              card.appendChild(dlBtn);
+            }
+            dlBtn.innerHTML = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg> Download Packet`;
+            dlBtn.onclick = () => { window.location = packetUrl; };
+          }
         }
       });
+    }
+
+    // Recount stat cards from live article row state
+    function _updateStatCounters() {
+      const rows   = document.querySelectorAll('.article-row');
+      let dl = 0, failed = 0;
+      rows.forEach(row => {
+        if (row.classList.contains('failed-row')) failed++;
+        else dl++;
+      });
+      document.getElementById('stat-dl').textContent   = dl;
+      document.getElementById('stat-skip').textContent = failed;
+      // Hide "Retry All Failed" button if nothing left to retry
+      const retryAllBtn = document.getElementById('btn-retry-all');
+      if (retryAllBtn) retryAllBtn.classList.toggle('hidden', failed === 0);
     }
 
     function downloadPacket(condition) {
