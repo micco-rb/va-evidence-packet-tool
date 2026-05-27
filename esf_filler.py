@@ -860,8 +860,8 @@ def _build_sig_overlay(
     """Build a transparent overlay PDF with the signature image + date string."""
     from reportlab.lib.utils import ImageReader
 
-    # Signature dimensions — ~2× previous size for visibility
-    SIG_W, SIG_H = 210, 50
+    # Signature dimensions (aspect ratio 4.2:1 locked)
+    SIG_W, SIG_H = 242, 58      # ×1.15 vs previous 210×50
 
     # Date font
     DATE_FONT_SIZE = 10
@@ -874,22 +874,24 @@ def _build_sig_overlay(
         if i == page_idx:
 
             # ── Compute centered signature Y ──────────────────────
-            # Center the image vertically within the 19A field row.
-            # sig_top/sig_bot are the pdfplumber bounds of the label word;
-            # the field row is typically the same height, so we centre there.
+            # sig_top/sig_bot are the pdfplumber bounds of the LABEL word
+            # (e.g. "19A. POA/AUTHORIZED REPRESENTATIVE SIGNATURE").
+            # The blank field area sits BELOW the label, so we offset
+            # downward (subtract in ReportLab's bottom-origin coordinates)
+            # to land inside the blank signing line rather than on the label.
             s_top = anchors.get("sig_top", 0)
             s_bot = anchors.get("sig_bot", s_top + 20)
-            field_mid_rl = ph - (s_top + s_bot) / 2        # rl y of row centre
-            sig_y = field_mid_rl - SIG_H / 2               # bottom-left of image
+            field_mid_rl = ph - (s_top + s_bot) / 2        # rl y of label centre
+            sig_y = field_mid_rl - SIG_H / 2 - 14          # shift down 14 pt below label
 
             # ── Compute centered date Y ────────────────────────────
-            # Place the text baseline so the date is centred in the 19B box.
-            # Typical text cap-height ≈ 70% of font size; ascender above
-            # baseline ≈ 0.7×font, so subtracting 0.35×font centres visually.
+            # Place the text baseline centred in the 19B guide boxes.
+            # The +4 pt upward nudge (−4 in RL) keeps digits from riding too
+            # high inside the printed boxes.
             d_top = anchors.get("date_top", s_top)
             d_h   = anchors.get("date_h", 12.0)
             d_mid_rl  = ph - (d_top + d_h / 2)
-            date_y    = d_mid_rl - DATE_FONT_SIZE * 0.35
+            date_y    = d_mid_rl - DATE_FONT_SIZE * 0.35 - 4   # shift down 4 pt
 
             # ── Debug: red/blue bounds ────────────────────────────
             if _DEBUG_OVERLAY:
