@@ -1,19 +1,17 @@
 """
 Renderer Worker — Playwright/Chromium PDF service.
 
-Runs on your local machine (outside Replit).
-
 Endpoints:
-  GET  /health   → {"ok": true}
+  GET  /health   → {"ok": true, "chromium": "<version>"}
   POST /render   → JSON {"url": "..."} → PDF bytes (application/pdf)
 
-The browser is launched ONCE at startup and reused for all requests.
-This avoids the overhead of spawning Chromium for every URL.
+Each /render request launches its own Playwright context and browser.
+This is slower than a singleton but completely thread-safe — no greenlet
+"Cannot switch to a different thread" errors regardless of Flask threading.
 """
 
-import asyncio
 import sys
-import threading
+import traceback
 
 from flask import Flask, request, Response, jsonify
 
@@ -23,11 +21,6 @@ except ImportError:
     print("ERROR: playwright not installed.")
     print("Run:  pip install playwright && playwright install chromium")
     sys.exit(1)
-
-# ── Browser singleton ─────────────────────────────────────────────────────────
-_pw       = None
-_browser  = None
-_lock     = threading.Lock()
 
 _LAUNCH_ARGS = [
     "--no-sandbox",
@@ -54,34 +47,55 @@ _PDF_OPTS = dict(
 )
 
 
-def _get_browser():
-    """Return the shared browser instance, launching it if needed."""
-    global _pw, _browser
-    if _browser is None or not _browser.is_connected():
-        if _pw is not None:
+def _render_pdf(url: str, timeout: int = 60_000) -> bytes:
+    """
+    Open url in a brand-new Playwright context, call page.pdf(), return bytes.
+
+    NO paywall detection.
+    NO publisher checks.
+    NO content filtering.
+
+    Only failure modes:
+      • Playwright throws during goto / pdf()  → exception propagates
+      • page.pdf() returns bytes that don't start with %PDF → caller checks
+    """
+    print(f"  [pw] launching chromium for {url!r}", flush=True)
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True, args=_LAUNCH_ARGS)
+        print(f"  [pw] browser launched  version={browser.version}", flush=True)
+
+        page = browser.new_page()
+        try:
+            # ── Step 1: navigate ───────────────────────────────────────────
+            print(f"  [pw] goto url={url!r}  wait_until=networkidle  timeout={timeout}", flush=True)
             try:
-                _pw.stop()
-            except Exception:
-                pass
-        _pw      = sync_playwright().start()
-        _browser = _pw.chromium.launch(headless=True, args=_LAUNCH_ARGS)
-        print(f"[worker] Browser launched — {_browser.version}", flush=True)
-    return _browser
+                nav_resp = page.goto(url, wait_until="networkidle", timeout=timeout)
+                status   = nav_resp.status if nav_resp else "unknown"
+                print(f"  [pw] page loaded  http_status={status}", flush=True)
+            except Exception as nav_exc:
+                # networkidle sometimes times-out on heavy pages; fall back to
+                # domcontentloaded which is enough for a print-to-PDF.
+                print(f"  [pw] networkidle failed ({nav_exc}) — retrying with domcontentloaded", flush=True)
+                nav_resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+                status   = nav_resp.status if nav_resp else "unknown"
+                print(f"  [pw] page loaded (fallback)  http_status={status}", flush=True)
 
+            # ── Step 2: settle ─────────────────────────────────────────────
+            print(f"  [pw] waiting 3 s for JS/CSS to settle …", flush=True)
+            page.wait_for_timeout(3_000)
 
-def _render_pdf(url: str, timeout: int = 45_000) -> bytes:
-    """Open url in a new page, print to PDF, close the page."""
-    browser = _get_browser()
-    page    = browser.new_page()
-    try:
-        print(f"  → {url}", flush=True)
-        page.goto(url, wait_until="networkidle", timeout=timeout)
-        page.wait_for_timeout(2000)          # let JS/CSS settle
-        pdf = page.pdf(**_PDF_OPTS)
-        print(f"  ✓ {len(pdf):,} bytes", flush=True)
-        return pdf
-    finally:
-        page.close()
+            # ── Step 3: print to PDF ───────────────────────────────────────
+            print(f"  [pw] calling page.pdf() …", flush=True)
+            pdf = page.pdf(**_PDF_OPTS)
+            valid = pdf[:4] == b"%PDF" if pdf else False
+            print(f"  [pw] page.pdf() returned {len(pdf):,} bytes  valid_pdf={valid}", flush=True)
+            return pdf
+
+        finally:
+            page.close()
+            browser.close()
+            print(f"  [pw] browser closed", flush=True)
 
 
 # ── Flask app ─────────────────────────────────────────────────────────────────
@@ -90,14 +104,15 @@ app = Flask(__name__)
 
 @app.get("/health")
 def health():
-    with _lock:
-        try:
-            browser = _get_browser()
-            ver     = browser.version
-        except Exception as exc:
-            return jsonify(ok=False, error=str(exc)), 503
-    return jsonify(ok=True, service="renderer-worker", version="1.0",
-                   chromium=ver)
+    """Lightweight liveness probe — just confirm Playwright can launch."""
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True, args=_LAUNCH_ARGS)
+            ver = browser.version
+            browser.close()
+    except Exception as exc:
+        return jsonify(ok=False, error=str(exc)), 503
+    return jsonify(ok=True, service="renderer-worker", version="1.0", chromium=ver)
 
 
 @app.post("/render")
@@ -107,15 +122,28 @@ def render():
     if not url:
         return jsonify(error="url is required"), 400
 
-    with _lock:                              # one render at a time
-        try:
-            pdf_bytes = _render_pdf(url)
-        except Exception as exc:
-            print(f"  [error] {exc}", flush=True)
-            return jsonify(error=str(exc)), 500
+    print(f"\n[render] ── START ──────────────────────────────────────────", flush=True)
+    print(f"[render] url={url!r}", flush=True)
+
+    # ── Render ────────────────────────────────────────────────────────────
+    try:
+        pdf_bytes = _render_pdf(url)
+    except Exception as exc:
+        tb = traceback.format_exc()
+        print(f"[render] EXCEPTION during _render_pdf:\n{tb}", flush=True)
+        return jsonify(error=str(exc), traceback=tb), 500
+
+    # ── Validate ──────────────────────────────────────────────────────────
+    print(f"[render] bytes received: {len(pdf_bytes):,}", flush=True)
+    print(f"[render] first 8 bytes:  {pdf_bytes[:8]!r}", flush=True)
 
     if not pdf_bytes or pdf_bytes[:4] != b"%PDF":
-        return jsonify(error="Chromium did not return a valid PDF"), 502
+        msg = f"page.pdf() returned {len(pdf_bytes)} bytes — not a valid PDF"
+        print(f"[render] FAIL: {msg}", flush=True)
+        return jsonify(error=msg), 502
+
+    print(f"[render] SUCCESS — returning {len(pdf_bytes):,} bytes", flush=True)
+    print(f"[render] ── END ────────────────────────────────────────────\n", flush=True)
 
     return Response(
         pdf_bytes,
@@ -129,13 +157,6 @@ if __name__ == "__main__":
     port = 7777
     print(f"\n  Renderer Worker — http://localhost:{port}")
     print(f"  Set in Replit Secrets:  RENDERER_URL = http://<your-LAN-ip>:{port}\n")
-
-    # Pre-launch the browser so the first request isn't slow
-    with _lock:
-        _get_browser()
-
-    # threaded=False: all requests run in the same (main) thread where the
-    # Playwright browser was launched.  With threaded=True Flask spawns a new
-    # thread per request and Playwright's sync API (which uses greenlets
-    # internally) raises "Cannot switch to a different thread".
-    app.run(host="0.0.0.0", port=port, threaded=False)
+    # threaded=True is fine now: each request creates its own Playwright context
+    # so there is no shared browser state that could cause greenlet thread errors.
+    app.run(host="0.0.0.0", port=port, threaded=True)

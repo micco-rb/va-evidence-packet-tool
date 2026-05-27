@@ -62,31 +62,57 @@ def _check_worker(base: str) -> None:
 
 def _render_url(base: str, url: str) -> bytes | None:
     """POST url to the worker; return PDF bytes or None on failure."""
+    endpoint = f"{base}/render"
+    print(f"  [dl] POST {endpoint}", flush=True)
+    print(f"  [dl] payload: url={url!r}", flush=True)
+
     try:
         resp = _http.post(
-            f"{base}/render",
+            endpoint,
             json    = {"url": url},
-            timeout = 90,                   # generous — page load + PDF render
+            timeout = 120,                  # generous — page load + PDF render
         )
     except _http.exceptions.ConnectionError as exc:
-        print(f"  [renderer] Connection lost: {exc}", flush=True)
+        print(f"  [dl] CONNECTION ERROR: {exc}", flush=True)
         return None
     except _http.exceptions.Timeout:
-        print(f"  [renderer] Request timed out for {url}", flush=True)
+        print(f"  [dl] TIMEOUT after 120 s for {url}", flush=True)
         return None
+    except Exception as exc:
+        print(f"  [dl] UNEXPECTED REQUEST ERROR: {type(exc).__name__}: {exc}", flush=True)
+        return None
+
+    # ── Step 1: HTTP status ───────────────────────────────────────────────
+    print(f"  [dl] HTTP status   : {resp.status_code}", flush=True)
+
+    # ── Step 2: Content-Type ──────────────────────────────────────────────
+    ct = resp.headers.get("Content-Type", "<none>")
+    print(f"  [dl] Content-Type  : {ct}", flush=True)
+
+    # ── Step 3: Byte size ─────────────────────────────────────────────────
+    body = resp.content
+    print(f"  [dl] Response size : {len(body):,} bytes", flush=True)
+
+    # ── Step 4: First bytes (magic number check) ──────────────────────────
+    print(f"  [dl] First 8 bytes : {body[:8]!r}", flush=True)
 
     if resp.status_code != 200:
-        print(f"  [renderer] Worker error {resp.status_code}: {resp.text[:200]}", flush=True)
+        # Print full error body (up to 500 chars) for diagnosis
+        try:
+            err_text = resp.json()
+        except Exception:
+            err_text = body[:500].decode("utf-8", errors="replace")
+        print(f"  [dl] WORKER ERROR body: {err_text}", flush=True)
         return None
 
-    pdf = resp.content
-    if pdf[:4] != b"%PDF":
-        print(f"  [renderer] Response is not a PDF ({len(pdf)} bytes) — skipping", flush=True)
+    if body[:4] != b"%PDF":
+        print(f"  [dl] NOT A VALID PDF — first bytes are {body[:20]!r}", flush=True)
+        print(f"  [dl] Body preview (first 300 chars): {body[:300].decode('utf-8', errors='replace')!r}", flush=True)
         return None
 
-    size = int(resp.headers.get("X-PDF-Size", len(pdf)))
-    print(f"  [renderer] Received {size:,} bytes  ✓", flush=True)
-    return pdf
+    size = int(resp.headers.get("X-PDF-Size", len(body)))
+    print(f"  [dl] PDF OK — {size:,} bytes  ✓", flush=True)
+    return body
 
 
 # ── Filename helper ───────────────────────────────────────────────────────────
