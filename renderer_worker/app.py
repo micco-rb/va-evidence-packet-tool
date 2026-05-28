@@ -540,17 +540,11 @@ app = Flask(__name__)
 
 @app.get("/health")
 def health():
-    try:
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True, args=_LAUNCH_ARGS)
-            ver = browser.version
-            browser.close()
-    except Exception as exc:
-        return jsonify(ok=False, error=str(exc)), 503
-    return jsonify(ok=True, service="renderer-worker", version="2.3",
-                   chromium=ver,
-                   max_concurrent=MAX_CONCURRENT,
-                   max_article_seconds=MAX_ARTICLE_SECONDS)
+    return jsonify(
+        ok=True,
+        service="renderer-worker",
+        version="2.3"
+    ), 200
 
 
 @app.post("/render")
